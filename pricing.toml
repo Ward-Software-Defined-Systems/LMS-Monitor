@@ -1,0 +1,15 @@
+# Default frontier pricing baked into the binary.
+# Per-million-token USD rates updated 2026-07-09.
+# Override at $XDG_CONFIG_HOME/lmstudio-monitor/config.toml or via --config.
+
+[providers.anthropic.models.claude-fable-5]
+input_per_mtok_usd  = 10.00
+output_per_mtok_usd = 50.00
+
+[providers.anthropic.models.claude-opus-4-8]
+input_per_mtok_usd  = 5.00
+output_per_mtok_usd = 25.00
+
+[providers.google.models.gemini-3-1-pro]
+input_per_mtok_usd  = 1.25
+output_per_mtok_usd = 10.00

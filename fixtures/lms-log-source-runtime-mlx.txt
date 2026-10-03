@@ -1,0 +1,8 @@
+Streaming logs from LM Studio
+
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 [cache_wrapper][INFO]: Prompt cache: using 0/11 tokens from cache
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 StopIteration: <EMPTY MESSAGE>
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 [cache_wrapper][INFO]: Prompt cache: using 0/34 tokens from cache
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 StopIteration: <EMPTY MESSAGE>
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 [cache_wrapper][INFO]: Prompt cache: using 0/17 tokens from cache
+[DEBUG] mlx-llm-mac-arm64-apple-metal-advsimd@1.6.0 (mlx-llm) qwen3.6-35b-a3b-ud-mlx pid=33833 StopIteration: <EMPTY MESSAGE>
