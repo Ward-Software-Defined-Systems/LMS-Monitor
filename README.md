@@ -4,7 +4,7 @@ A standalone Rust TUI that passively observes [LM Studio](https://lmstudio.ai) i
 
 - **Live request feed** — last 30 completed inferences (timestamp, model, prompt/gen tokens, TTFT, tok/s, stop reason)
 - **Rolling throughput** — 1m / 5m / 15m / session-lifetime windows, per-model
-- **Hypothetical frontier cost** — Claude Fable 5, Opus 4.8, Gemini 3.1 Pro priced against the local token counts
+- **Hypothetical frontier cost** — Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Gemini 3.1 Pro priced against the local token counts
 - **Hardware** — system + LM Studio process tree CPU%, memory, GPU active residency, ANE power
 
 No real frontier API calls — costs come from a baked-in pricing table. No daemon. Single binary. Local SQLite for cross-session totals.

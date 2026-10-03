@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::parser::InferenceRecord;
 
 pub const FRONTIER_MODELS: &[&str] = &[
+    "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "gemini-3-1-pro",
 ];
@@ -104,6 +107,15 @@ mod tests {
         let opus = table.lookup("claude-opus-4-8").unwrap();
         assert_eq!(opus.input_per_mtok_usd, 5.00);
         assert_eq!(opus.output_per_mtok_usd, 25.00);
+
+        for (key, input, output) in [
+            ("claude-fable-5-1", 10.00, 50.00),
+            ("claude-opus-5-5", 4.00, 20.00),
+            ("claude-opus-5", 5.00, 25.00),
+        ] {
+            let p = table.lookup(key).unwrap();
+            assert_eq!((p.input_per_mtok_usd, p.output_per_mtok_usd), (input, output), "{key}");
+        }
 
         let gemini = table.lookup("gemini-3-1-pro").unwrap();
         assert_eq!(gemini.input_per_mtok_usd, 1.25);

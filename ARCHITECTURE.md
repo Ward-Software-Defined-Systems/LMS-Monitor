@@ -100,11 +100,14 @@ Sessions are stamped on app start (`started_at`); `ended_at` is filled on gracef
 
 ## Pricing
 
-[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time. Rates updated 2026-07-09 (the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). The three frontier model keys are constant:
+[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time. Rates updated 2026-10-03 (the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). The six frontier model keys are constant:
 
 ```rust
 pub const FRONTIER_MODELS: &[&str] = &[
+    "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "gemini-3-1-pro",   // hyphenated for TOML
 ];
