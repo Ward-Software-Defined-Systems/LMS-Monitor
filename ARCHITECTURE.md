@@ -100,13 +100,12 @@ Sessions are stamped on app start (`started_at`); `ended_at` is filled on gracef
 
 ## Pricing
 
-[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time. Values from [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd). The four frontier model keys are constant:
+[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time. Rates updated 2026-07-09 (the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). The three frontier model keys are constant:
 
 ```rust
 pub const FRONTIER_MODELS: &[&str] = &[
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
+    "claude-fable-5",
+    "claude-opus-4-8",
     "gemini-3-1-pro",   // hyphenated for TOML
 ];
 ```
@@ -139,6 +138,8 @@ The cpu_power sampler is deliberately included alongside ane_power — on M4 Max
 | rolling metrics | 9 | `1m / 5m / 15m / session` columns; rows = req count, prompt tok, gen tok, mean tps, p95 tps, mean TTFT |
 | hypothetical cost | 7 | per-frontier-model session-cumulative input / output / total USD |
 | footer | 1 | `q quit · r reset session · p pause` |
+
+Ollama-Monitor (`../Ollama-Monitor`) ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
 
 Render tick: 250 ms. Channel reads non-blocking via `tokio::select!`. Input events arrive from a dedicated blocking thread (sync `crossterm::event::read` → mpsc → main loop).
 

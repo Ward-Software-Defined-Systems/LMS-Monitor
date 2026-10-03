@@ -4,7 +4,7 @@ A standalone Rust TUI that passively observes [LM Studio](https://lmstudio.ai) i
 
 - **Live request feed** — last 30 completed inferences (timestamp, model, prompt/gen tokens, TTFT, tok/s, stop reason)
 - **Rolling throughput** — 1m / 5m / 15m / session-lifetime windows, per-model
-- **Hypothetical frontier cost** — Claude Opus 4.7, Sonnet 4.6, Haiku 4.5, Gemini 3.1 Pro priced against the local token counts
+- **Hypothetical frontier cost** — Claude Fable 5, Opus 4.8, Gemini 3.1 Pro priced against the local token counts
 - **Hardware** — system + LM Studio process tree CPU%, memory, GPU active residency, ANE power
 
 No real frontier API calls — costs come from a baked-in pricing table. No daemon. Single binary. Local SQLite for cross-session totals.
@@ -70,10 +70,10 @@ Set `LMS_LOG=debug` (or `trace`) to crank tracing detail in the log file. `trace
 
 ## Override pricing
 
-Defaults are baked in from the values in [`pricing.toml`](./pricing.toml) (per [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). To override, drop a TOML file at `~/Library/Application Support/lmstudio-monitor/config.toml`:
+Defaults are baked in from the values in [`pricing.toml`](./pricing.toml) (rates updated 2026-07-09; the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). To override, drop a TOML file at `~/Library/Application Support/lmstudio-monitor/config.toml`:
 
 ```toml
-[pricing.providers.anthropic.models.claude-opus-4-7]
+[pricing.providers.anthropic.models.claude-opus-4-8]
 input_per_mtok_usd  = 5.00
 output_per_mtok_usd = 25.00
 ```
