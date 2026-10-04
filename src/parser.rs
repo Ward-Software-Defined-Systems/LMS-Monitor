@@ -120,7 +120,9 @@ impl RecordBuilder {
     pub fn new() -> Self {
         Self {
             pending: HashMap::new(),
-            stale_after: Duration::from_secs(300),
+            // Well past the slowest plausible request: a long prompt's start must still be
+            // queued when its stats arrive, minutes later.
+            stale_after: Duration::from_secs(3600),
         }
     }
 
@@ -323,6 +325,34 @@ mod tests {
         });
         builder.evict_stale(1_200); // anything before t=1100 is stale
         assert_eq!(builder.pending_count("m"), 1);
+    }
+
+    #[test]
+    fn long_request_keeps_its_start_after_an_eviction_sweep() {
+        // A ~5-minute request: 164 s to first token, then 1,947 tokens at 13.8 tok/s.
+        let mut builder = RecordBuilder::new();
+        builder.ingest(LogEvent::PredictionInput {
+            model_id: "m".into(),
+            timestamp_ms: 0,
+        });
+        builder.evict_stale(301_000);
+        let rec = builder
+            .ingest(LogEvent::PredictionOutput {
+                model_id: "m".into(),
+                timestamp_ms: 305_000,
+                stats: PredictionStats {
+                    stop_reason: Some("eosFound".into()),
+                    tokens_per_second: 13.8,
+                    num_gpu_layers: None,
+                    time_to_first_token_sec: 163.9,
+                    total_time_sec: 141.1,
+                    prompt_tokens_count: 55_566,
+                    predicted_tokens_count: 1_947,
+                    total_tokens_count: 57_513,
+                },
+            })
+            .unwrap();
+        assert_eq!(rec.started_at.timestamp_millis(), 0);
     }
 
     #[test]

@@ -8,23 +8,26 @@ It's passive: it reads LM Studio's own stats stream and never sits in the reques
 
 ## Features
 
-- **Live request feed**: the last 30 completed requests with time, model, prompt and generated tokens, time to first token, tokens per second and stop reason.
-- **Models**: every downloaded model with its type, format, quantization, context length and load state; `▸` marks the model the last request went to.
-- **Rolling metrics**: requests, tokens, mean and p95 tokens per second, and mean time to first token over the last 1, 5 and 15 minutes and the whole session.
-- **Hypothetical cost**: your session's token counts priced at list rates for Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8 and Gemini 3.1 Pro.
-- **Hardware**: system CPU and memory, CPU and memory of the LM Studio process tree, GPU active residency and Neural Engine power.
-- **History**: lifetime request and token totals across sessions, kept in a local SQLite database.
+- **Live request feed**: the last 30 completed requests, newest first, with start time, model, prompt and generated tokens, time to first token, tokens per second and stop reason. It shows as many as fit (4 rows in a 36-row terminal, 8 in a 40-row one) and doesn't scroll.
+- **Models**: your downloaded models, loaded or not, with type, format, quantization, maximum context length and load state; `▸` marks the model the last request went to. The panel has room for three, so extra models are cut off.
+- **Rolling metrics**: requests, prompt and generated tokens, mean and p95 tokens per second, and mean time to first token over the last 1, 5 and 15 minutes and the whole session.
+- **Hypothetical cost**: the session's prompt and generated tokens priced at list rates for Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8 and Gemini 3.1 Pro.
+- **Hardware**: system CPU and memory; CPU, memory and process count summed over LM Studio's processes (the app, its helpers, the inference worker and the `lms` CLI); GPU active residency and Neural Engine power. LM Studio's CPU is per core, so it can pass 100%.
+- **History**: lifetime request, session and token totals, kept in a local SQLite database. Each run of the monitor is one session.
 
 ## How it works
 
-LM Studio publishes per-prediction stats on its log stream. LMS-Monitor runs `lms log stream -s model --stats --json` as a subprocess and reads it line by line, and polls the server's `/api/v0/models` endpoint every 2 seconds for the model list. Hardware figures come from [`sysinfo`](https://crates.io/crates/sysinfo) and from macOS's `powermetrics`, which needs sudo.
+LM Studio publishes per-request events on its log stream. LMS-Monitor runs `lms log stream -s model --stats --json` as a subprocess and reads it line by line: each request produces one event when it starts and another, carrying its stats, when it finishes, and the monitor pairs the two. It also polls the server's `/api/v0/models` endpoint every 2 seconds for the model list. Hardware figures come from [`sysinfo`](https://crates.io/crates/sysinfo) and from macOS's `powermetrics`, which needs sudo.
 
-**Privacy:** the database stores only per-request metadata (model, token counts, timings), never prompt or response text. Nothing leaves your machine; the cost figures come from a pricing table compiled into the binary.
+Only requests made while the monitor is running are counted; it doesn't read LM Studio's history.
+
+**Privacy:** the stream carries each request's full prompt and response text. The monitor discards it as it parses each line and never logs or stores it; the database holds only per-request metadata (model, token counts, timings). Nothing leaves your machine: the only network traffic is to the LM Studio server, and the cost figures come from a pricing table compiled into the binary.
 
 ## Requirements
 
 - macOS. Apple Silicon is recommended: the GPU and Neural Engine figures come from `powermetrics`.
 - LM Studio with its local server running (Developer tab → Start Server). The `lms` CLI ships with LM Studio at `~/.lmstudio/bin/lms` and doesn't need to be on your `PATH`.
+- A terminal at least 120 columns wide and 36 rows tall. The status line is longer (about 145 columns), so in a narrower window its clock is cut off.
 - Rust 1.94 or newer, to build.
 - sudo, for the GPU and Neural Engine figures only.
 
@@ -45,7 +48,7 @@ lmstudio-monitor
 
 It connects to LM Studio's default address, `http://localhost:1234`. If your server listens elsewhere, pass `--base-url` or set `LMS_BASE_URL`.
 
-At launch it asks for your sudo password, used only to start `powermetrics` for the GPU and Neural Engine figures. Run it as your normal user, not under `sudo`. If sudo fails, those two figures show `n/a` and everything else still works.
+Before the dashboard opens, it runs `sudo -v`, which asks for your password unless sudo has it cached. Sudo is used only to start `powermetrics` for the GPU and Neural Engine figures; if it fails, those two show `n/a` and everything else still works. Run the monitor as your normal user, not under `sudo`: a root run also runs `lms` as root and can leave root-owned files in your Application Support folder (see Troubleshooting).
 
 `--no-tui` runs headless instead: one summary line per request on stderr, still recorded to the database, and no sudo prompt.
 
@@ -64,18 +67,29 @@ At launch it asks for your sudo password, used only to start `powermetrics` for 
 | key | action |
 |---|---|
 | `q` or `Ctrl-C` | quit |
-| `r` | reset the session counters (the database keeps everything) |
-| `p` | pause the display (requests are still recorded) |
+| `r` | reset the session: clears the feed, rolling metrics and cost panel (the database and lifetime totals keep everything) |
+| `p` | pause or resume. Requests that finish while paused are saved to the database and counted in the lifetime totals, but they never reach the feed, rolling metrics or cost panel, even after you resume. Everything else keeps updating. |
+
+## Capture accuracy
+
+Token counts, time to first token and tokens per second are LM Studio's own figures for each request. Two things are inferred:
+
+- **Start time.** A request's stats arrive in a separate event when it finishes. The monitor matches that event to the oldest pending start event for the same model that is recent enough to belong to it; if none is, it uses the finish time. With several requests in flight on one model, a request can get another one's start time.
+- **Windows.** The 1, 5 and 15 minute windows count requests by start time, so a request that ran longer than a minute never shows in the 1m column.
+
+A request shows up only once it finishes. Requests that finish while the `lms` stream is restarting, or whose stats event is missing a field the monitor needs, aren't recorded.
 
 ## Configuration
 
-Prices live in [`pricing.toml`](pricing.toml) and are compiled in. To change one, add an override to `~/Library/Application Support/lmstudio-monitor/config.toml`:
+Prices live in [`pricing.toml`](pricing.toml) and are compiled in. To change any of them, add overrides to `~/Library/Application Support/lmstudio-monitor/config.toml`, or to a file you pass with `--config`. Each entry replaces one model's rates; the others keep their defaults. For example, if most of your prompts run past 200K tokens, price Gemini at its long-context rate:
 
 ```toml
-[pricing.providers.anthropic.models.claude-opus-4-8]
-input_per_mtok_usd  = 5.00
-output_per_mtok_usd = 25.00
+[pricing.providers.google.models.gemini-3-1-pro]
+input_per_mtok_usd  = 4.00
+output_per_mtok_usd = 18.00
 ```
+
+Entries must sit under `[pricing.providers.<provider>.models.<model>]`; anything else in the file is ignored. The cost panel always shows the same six models, so entries for other model names have no effect. A missing config file is fine, including a `--config` path that doesn't exist, but a file that doesn't parse stops the monitor at startup with the error.
 
 The cost panel is a rough comparison, not a quote. It applies list prices to your local model's token counts (a frontier model would tokenize the same text differently), and it ignores prompt caching, batch discounts and long-context pricing tiers.
 
@@ -87,25 +101,25 @@ The cost panel is a rough comparison, not a quote. It applies list prices to you
 | log | `~/Library/Application Support/lmstudio-monitor/lmstudio-monitor.log` |
 | config (optional) | `~/Library/Application Support/lmstudio-monitor/config.toml` |
 
-Set `LMS_LOG=debug` or `LMS_LOG=trace` for more detail in the log; `trace` includes the raw `powermetrics` output.
+The log isn't rotated. `LMS_LOG` sets its filter: `LMS_LOG=debug` adds detail, and `LMS_LOG=info,lmstudio_monitor::powermetrics=trace` adds the raw `powermetrics` output. A bare `LMS_LOG=trace` also turns on trace output from every library the monitor uses.
 
 ## Troubleshooting
 
 | symptom | check |
 |---|---|
-| header shows `server: ● unreachable` | Is the LM Studio server running (`~/.lmstudio/bin/lms server status`)? Is `--base-url` pointing at its port? |
-| no requests appear | `~/.lmstudio/bin/lms log stream -s model --stats --json` should print a JSON line per prediction; if it doesn't, update LM Studio. |
-| GPU or ANE shows `n/a` | Run with `LMS_LOG=trace` and search the log for `powermetrics`. |
-| sudo prompt fails | Run `sudo -v` first, or use `--no-tui`. |
+| header shows `server: ● unreachable` | Is the LM Studio server running (`~/.lmstudio/bin/lms server status`)? Is `--base-url` pointing at its port? The `err:` text after the status says what failed. The models panel keeps showing the last list it got. |
+| no requests appear | Does the header show `[PAUSED]`? Requests appear only when they finish. `~/.lmstudio/bin/lms log stream -s model --stats --json` should print a JSON line when a request starts and another when it finishes; if it doesn't, update LM Studio. If `lms` lives elsewhere, pass `--lms-bin`; when it can't be started, the log shows `lms log stream error`. |
+| "Permission denied" on the log or database at startup | An earlier run under `sudo` left root-owned files: `sudo chown -R "$USER":staff ~/Library/Application\ Support/lmstudio-monitor`. |
+| GPU or ANE shows `n/a` | Check that `sudo powermetrics --samplers cpu_power,gpu_power,ane_power -n 1` prints `GPU HW active residency` and `ANE Power` lines. Then run with `LMS_LOG=info,lmstudio_monitor::powermetrics=trace` and search the log for `powermetrics`. If they switch to `n/a` mid-run, powermetrics exited (the log says `powermetrics exited`); restart the monitor to bring them back. |
 
 ## Development
 
 ```sh
 cargo test
-cargo fmt --check && cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings
 ```
 
-CI ([`.gitlab-ci.yml`](.gitlab-ci.yml)) runs the same checks on Linux. [ARCHITECTURE.md](ARCHITECTURE.md) covers the module layout, data flow and design decisions.
+CI ([`.gitlab-ci.yml`](.gitlab-ci.yml)) runs the same checks, with `cargo test --locked`, on Linux; the tests need no LM Studio, sudo or terminal. [ARCHITECTURE.md](ARCHITECTURE.md) covers the module layout, data flow and design decisions.
 
 [Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor) is a sibling project that shows the same dashboard for Ollama.
 

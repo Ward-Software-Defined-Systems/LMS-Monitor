@@ -28,8 +28,14 @@ impl Config {
         Ok(cfg)
     }
 
-    pub fn pricing_or_defaults(&self) -> PricingTable {
-        self.pricing.clone().unwrap_or_else(PricingTable::defaults)
+    /// The baked-in pricing with the config's `[pricing]` overrides merged on top,
+    /// model by model; models the config doesn't mention keep their default rates.
+    pub fn effective_pricing(&self) -> PricingTable {
+        let mut table = PricingTable::defaults();
+        if let Some(overrides) = &self.pricing {
+            table.merge(overrides);
+        }
+        table
     }
 }
 
@@ -65,11 +71,51 @@ mod tests {
     }
 
     #[test]
-    fn pricing_or_defaults_loads_baked_when_absent() {
+    fn effective_pricing_is_baked_when_absent() {
         let cfg = Config::default();
-        let table = cfg.pricing_or_defaults();
+        let table = cfg.effective_pricing();
         for key in crate::pricing::FRONTIER_MODELS {
             assert!(table.lookup(key).is_some());
+        }
+    }
+
+    #[test]
+    fn partial_override_keeps_other_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+[pricing.providers.google.models.gemini-3-1-pro]
+input_per_mtok_usd = 4.00
+output_per_mtok_usd = 18.00
+"#,
+        )
+        .unwrap();
+        let table = cfg.effective_pricing();
+        let gemini = table.lookup("gemini-3-1-pro").unwrap();
+        assert_eq!(
+            (gemini.input_per_mtok_usd, gemini.output_per_mtok_usd),
+            (4.00, 18.00)
+        );
+        for key in crate::pricing::FRONTIER_MODELS {
+            assert!(
+                table.lookup(key).is_some(),
+                "{key} lost to a partial override"
+            );
+        }
+        assert_eq!(
+            table.lookup("claude-opus-4-8").unwrap().input_per_mtok_usd,
+            5.00
+        );
+    }
+
+    #[test]
+    fn empty_pricing_section_keeps_defaults() {
+        let cfg: Config = toml::from_str("[pricing]\n").unwrap();
+        let table = cfg.effective_pricing();
+        for key in crate::pricing::FRONTIER_MODELS {
+            assert!(
+                table.lookup(key).is_some(),
+                "{key} lost to an empty [pricing]"
+            );
         }
     }
 

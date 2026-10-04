@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,13 +24,13 @@ pub struct ModelPrice {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Provider {
     #[serde(default)]
-    pub models: HashMap<String, ModelPrice>,
+    pub models: BTreeMap<String, ModelPrice>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PricingTable {
     #[serde(default)]
-    pub providers: HashMap<String, Provider>,
+    pub providers: BTreeMap<String, Provider>,
 }
 
 impl PricingTable {
@@ -46,6 +46,24 @@ impl PricingTable {
         self.providers
             .values()
             .find_map(|p| p.models.get(model_key))
+    }
+
+    /// Lays `overrides` over this table one model at a time. Each key is first removed
+    /// from every provider, so an override wins whichever provider it's filed under and
+    /// `lookup` never sees two rates for one model.
+    pub fn merge(&mut self, overrides: &PricingTable) {
+        for (provider, p) in &overrides.providers {
+            for (key, price) in &p.models {
+                for existing in self.providers.values_mut() {
+                    existing.models.remove(key);
+                }
+                self.providers
+                    .entry(provider.clone())
+                    .or_default()
+                    .models
+                    .insert(key.clone(), price.clone());
+            }
+        }
     }
 }
 
@@ -122,8 +140,8 @@ mod tests {
         }
 
         let gemini = table.lookup("gemini-3-1-pro").unwrap();
-        assert_eq!(gemini.input_per_mtok_usd, 1.25);
-        assert_eq!(gemini.output_per_mtok_usd, 10.00);
+        assert_eq!(gemini.input_per_mtok_usd, 2.00);
+        assert_eq!(gemini.output_per_mtok_usd, 12.00);
     }
 
     #[test]
@@ -140,6 +158,51 @@ mod tests {
     fn lookup_unknown_returns_none() {
         let table = PricingTable::defaults();
         assert!(table.lookup("nonexistent-model").is_none());
+    }
+
+    #[test]
+    fn merge_overrides_one_model_and_keeps_the_rest() {
+        let mut table = PricingTable::defaults();
+        let overrides = PricingTable::from_str(
+            r#"
+[providers.mine.models.claude-opus-4-8]
+input_per_mtok_usd = 1.0
+output_per_mtok_usd = 2.0
+"#,
+        )
+        .unwrap();
+        table.merge(&overrides);
+
+        let opus = table.lookup("claude-opus-4-8").unwrap();
+        assert_eq!(
+            (opus.input_per_mtok_usd, opus.output_per_mtok_usd),
+            (1.0, 2.0)
+        );
+        let holders: Vec<&str> = table
+            .providers
+            .iter()
+            .filter(|(_, p)| p.models.contains_key("claude-opus-4-8"))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(holders, ["mine"], "the override must be the only rate left");
+        for key in FRONTIER_MODELS {
+            assert!(table.lookup(key).is_some(), "{key} lost in merge");
+        }
+        assert_eq!(
+            table.lookup("claude-fable-5").unwrap().input_per_mtok_usd,
+            10.00
+        );
+    }
+
+    #[test]
+    fn baked_keys_are_unique_across_providers() {
+        let table = PricingTable::defaults();
+        let mut seen = std::collections::BTreeSet::new();
+        for p in table.providers.values() {
+            for key in p.models.keys() {
+                assert!(seen.insert(key.as_str()), "{key} is under two providers");
+            }
+        }
     }
 
     #[test]

@@ -220,28 +220,22 @@ pub async fn run(
                     break Ok(());
                 }
             }
-            snap = models_rx.recv() => {
-                if let Some(s) = snap {
-                    state.ingest_models(s);
-                }
+            // `Some(..)` patterns disable an arm once its channel closes; matching `None`
+            // would complete instantly on every pass and spin the loop.
+            Some(snap) = models_rx.recv() => {
+                state.ingest_models(snap);
             }
-            rec = record_rx.recv() => {
-                if let Some(r) = rec {
-                    if let Some(sink) = &record_sink {
-                        sink.insert(r.clone()).await;
-                    }
-                    state.ingest_record(r);
+            Some(rec) = record_rx.recv() => {
+                if let Some(sink) = &record_sink {
+                    sink.insert(rec.clone()).await;
                 }
+                state.ingest_record(rec);
             }
-            lt = lifetime_rx.recv() => {
-                if let Some(t) = lt {
-                    state.lifetime = t;
-                }
+            Some(totals) = lifetime_rx.recv() => {
+                state.lifetime = totals;
             }
-            hw = hardware_rx.recv() => {
-                if let Some(h) = hw {
-                    state.hardware = h;
-                }
+            Some(hw) = hardware_rx.recv() => {
+                state.hardware = hw;
             }
             _ = shutdown.changed() => {
                 break Ok(());
@@ -316,5 +310,27 @@ mod tests {
             "hardware row clipped: {hw_row}"
         );
         assert!(lines.last().unwrap().contains("q quit"), "footer missing");
+    }
+
+    /// Re-pricing one model in the config must leave every other cost column priced.
+    #[test]
+    fn partial_pricing_override_keeps_every_cost_column() {
+        let cfg: crate::config::Config = toml::from_str(
+            "[pricing.providers.google.models.gemini-3-1-pro]\n\
+             input_per_mtok_usd = 4.0\n\
+             output_per_mtok_usd = 18.0\n",
+        )
+        .unwrap();
+        let mut state = sample_state();
+        state.pricing = cfg.effective_pricing();
+        let lines = render_to_lines(120, 36, &state);
+        assert!(
+            lines.iter().any(|l| l.contains("gemini-3-1-pro")),
+            "cost panel missing"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("(no rate)")),
+            "a cost column lost its rate"
+        );
     }
 }

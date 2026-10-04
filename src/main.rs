@@ -63,7 +63,19 @@ async fn main() -> Result<()> {
     );
 
     let cfg = config::Config::load(config_path.as_deref())?;
-    let pricing = cfg.pricing_or_defaults();
+    let pricing = cfg.effective_pricing();
+
+    // Take the sudo password now, while the terminal is still in normal mode and before
+    // the database is opened, so Ctrl-C at the prompt exits without recording a session.
+    // powermetrics later runs with `sudo -n` on the cached credential.
+    if !cli.no_tui {
+        eprintln!(
+            "lmstudio-monitor: sudo runs powermetrics for the GPU/ANE figures (--no-tui skips it)"
+        );
+        if !hardware::prime_sudo() {
+            eprintln!("sudo -v failed; GPU/ANE may show n/a");
+        }
+    }
 
     let conn = db::open_or_create(&db_path)?;
     let session_id = db::start_session(&conn)?;
@@ -93,14 +105,12 @@ async fn main() -> Result<()> {
 
     tokio::spawn(parser::parser_task(line_rx, records_tx));
 
-    // Spawn `sudo powermetrics` BEFORE entering TUI raw mode so the password prompt
-    // (if needed) appears in the cooked terminal. If it fails, we fall back to None
-    // and GPU/ANE simply show "n/a" in the panel — TUI still launches.
+    // Spawned even if `prime_sudo` failed, so a NOPASSWD rule for powermetrics still
+    // works. If it can't start, GPU/ANE show n/a and the TUI runs anyway.
     let pm_handle = if cli.no_tui {
         None
     } else {
-        eprintln!("Starting powermetrics (GPU/ANE telemetry; may prompt for sudo password)…");
-        match hardware::spawn_powermetrics().await {
+        match hardware::spawn_powermetrics(shutdown_rx.clone()).await {
             Ok(h) => Some(h),
             Err(e) => {
                 eprintln!("powermetrics unavailable: {e:#} — GPU/ANE will show n/a");

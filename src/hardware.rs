@@ -9,7 +9,7 @@ use sysinfo::{
     CpuRefreshKind, MemoryRefreshKind, Process, ProcessRefreshKind, ProcessesToUpdate, RefreshKind,
     System,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -25,8 +25,8 @@ pub struct HardwareSnapshot {
     pub lms_process_count: u32,
 
     /// Apple Silicon GPU / ANE telemetry from `powermetrics`.
-    /// `None` if powermetrics didn't start, hasn't produced a sample yet, or
-    /// emitted an unrecognized format.
+    /// `None` if powermetrics didn't start, hasn't produced a sample yet, has exited,
+    /// or emitted an unrecognized format.
     pub gpu_active_percent: Option<f32>,
     pub ane_power_mw: Option<f32>,
 }
@@ -58,13 +58,41 @@ impl PowermetricsHandle {
     }
 }
 
-/// Spawn `sudo powermetrics --samplers gpu_power,ane_power -i 2000` and a sub-task that
-/// parses the streaming text output into a shared state. The sudo password prompt fires
-/// before this returns — caller must invoke this BEFORE entering TUI raw mode.
-pub async fn spawn_powermetrics() -> Result<PowermetricsHandle> {
+const SUDO_PROMPT: &str = "[lmstudio-monitor] sudo password (for powermetrics GPU/ANE telemetry): ";
+
+/// Runs `sudo -v` in the foreground so a password prompt reads from a normal cooked
+/// terminal, caching the credential that `spawn_powermetrics`'s `sudo -n` relies on.
+/// Call it before the TUI takes the terminal. Returns whether sudo accepted; failure
+/// isn't fatal, GPU/ANE just end up n/a.
+pub fn prime_sudo() -> bool {
+    match std::process::Command::new("sudo")
+        .args(["-v", "--prompt", SUDO_PROMPT])
+        .status()
+    {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            tracing::warn!("sudo -v exited with {status}; GPU/ANE may show n/a");
+            false
+        }
+        Err(e) => {
+            tracing::warn!("sudo -v could not run: {e}; GPU/ANE may show n/a");
+            false
+        }
+    }
+}
+
+/// Spawns `sudo -n /usr/bin/powermetrics …` and a task that parses its output into
+/// shared state (see `pump_powermetrics`), returning as soon as the child is spawned.
+/// `-n` never prompts: it uses the credential `prime_sudo` cached (or a NOPASSWD rule)
+/// and otherwise fails at once, leaving GPU/ANE at n/a.
+///
+/// The child gets its own process group. With `use_pty` (on by default since sudo
+/// 1.9.14), a sudo in the terminal's foreground group may read keystrokes to relay to
+/// its command; in a background group it never reads from or reconfigures the TUI's
+/// terminal. That is only safe because `-n` keeps it from prompting.
+pub async fn spawn_powermetrics(shutdown: watch::Receiver<bool>) -> Result<PowermetricsHandle> {
     let mut cmd = Command::new("sudo");
-    cmd.arg("--prompt")
-        .arg("[lmstudio-monitor] sudo password (for powermetrics GPU/ANE telemetry): ")
+    cmd.arg("-n")
         .arg("/usr/bin/powermetrics")
         // cpu_power emits the unified power summary including ANE Power on Apple Silicon;
         // gpu_power emits GPU HW active residency. Without cpu_power, ANE is silent on M4 Max.
@@ -72,45 +100,59 @@ pub async fn spawn_powermetrics() -> Result<PowermetricsHandle> {
         .arg("cpu_power,gpu_power,ane_power")
         .arg("-i")
         .arg("2000")
+        .process_group(0)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
     let mut child = cmd
         .spawn()
-        .context("spawn sudo powermetrics (is sudo on PATH?)")?;
+        .context("spawn sudo -n powermetrics (is sudo on PATH?)")?;
     let stdout = child
         .stdout
         .take()
         .context("powermetrics child has no stdout")?;
 
-    let state: PowermetricsStateHandle = Arc::new(Mutex::new(PowermetricsState::default()));
-    let state_for_reader = state.clone();
-
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        loop {
-            match reader.next_line().await {
-                Ok(Some(line)) => {
-                    tracing::trace!(target: "lmstudio_monitor::powermetrics", "{line}");
-                    if let Some(pct) = parse_gpu_active_percent(&line) {
-                        state_for_reader.lock().await.gpu_active_percent = Some(pct);
-                    } else if let Some(mw) = parse_ane_power_mw(&line) {
-                        state_for_reader.lock().await.ane_power_mw = Some(mw);
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("powermetrics stdout closed");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!("powermetrics stdout read error: {e}");
-                    return;
-                }
-            }
-        }
-    });
+    let state = PowermetricsStateHandle::default();
+    tokio::spawn(pump_powermetrics(
+        BufReader::new(stdout),
+        state.clone(),
+        shutdown,
+    ));
 
     Ok(PowermetricsHandle { state, child })
+}
+
+/// Feeds powermetrics output into `state` until the stream ends, then clears the
+/// readings so the panel shows n/a instead of numbers frozen at their last values.
+/// The stream ends when powermetrics exits: at shutdown, after `terminate`, or on its
+/// own mid-run, which is worth a warning because it's never respawned.
+async fn pump_powermetrics<R: AsyncBufRead + Unpin>(
+    reader: R,
+    state: PowermetricsStateHandle,
+    shutdown: watch::Receiver<bool>,
+) {
+    let mut lines = reader.lines();
+    let ended = loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                tracing::trace!(target: "lmstudio_monitor::powermetrics", "{line}");
+                if let Some(pct) = parse_gpu_active_percent(&line) {
+                    state.lock().await.gpu_active_percent = Some(pct);
+                } else if let Some(mw) = parse_ane_power_mw(&line) {
+                    state.lock().await.ane_power_mw = Some(mw);
+                }
+            }
+            Ok(None) => break "powermetrics exited".to_string(),
+            Err(e) => break format!("powermetrics read failed: {e}"),
+        }
+    };
+    *state.lock().await = PowermetricsState::default();
+    if *shutdown.borrow() {
+        tracing::info!("{ended} (shutting down)");
+    } else {
+        tracing::warn!("{ended}; GPU/ANE will show n/a");
+    }
 }
 
 fn parse_gpu_active_percent(line: &str) -> Option<f32> {
@@ -357,6 +399,47 @@ mod tests {
         );
 
         let _ = sd_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn readings_clear_when_powermetrics_exits() {
+        use tokio::io::AsyncWriteExt;
+
+        let state = PowermetricsStateHandle::default();
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (mut powermetrics_out, pipe) = tokio::io::duplex(256);
+        let pump = tokio::spawn(pump_powermetrics(
+            BufReader::new(pipe),
+            state.clone(),
+            shutdown_rx,
+        ));
+
+        powermetrics_out
+            .write_all(b"GPU HW active residency:  38.45% (338 MHz: 1%)\nANE Power: 234 mW\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                {
+                    let s = state.lock().await;
+                    if s.gpu_active_percent.is_some() && s.ane_power_mw.is_some() {
+                        assert_eq!(
+                            (s.gpu_active_percent, s.ane_power_mw),
+                            (Some(38.45), Some(234.0))
+                        );
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("readings should arrive while powermetrics runs");
+
+        drop(powermetrics_out); // powermetrics exits
+        pump.await.unwrap();
+        let s = state.lock().await;
+        assert_eq!((s.gpu_active_percent, s.ane_power_mw), (None, None));
     }
 
     #[test]

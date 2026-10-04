@@ -54,6 +54,7 @@ async fn run_once(
     let bin = expand_tilde(lms_bin);
     let mut child = Command::new(&bin)
         .args(ARGS)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
