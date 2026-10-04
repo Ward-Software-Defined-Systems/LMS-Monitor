@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 description = "Passive observer for a local LM Studio instance: live request feed, rolling tok/s, hypothetical frontier-API cost, and hardware telemetry in a TUI."
 license = "MIT"
+repository = "https://github.com/Ward-Software-Defined-Systems/LMS-Monitor"
 
 [dependencies]
 anyhow = "1.0.102"

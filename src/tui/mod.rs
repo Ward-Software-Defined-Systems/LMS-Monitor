@@ -259,7 +259,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn sample_state() -> AppState {
-        let mut state = AppState::new("http://localhost:31337".into(), PricingTable::defaults());
+        let mut state = AppState::new("http://localhost:1234".into(), PricingTable::defaults());
         state.hardware = HardwareSnapshot {
             system_cpu_percent: 23.4,
             mem_used_bytes: 38_200_000_000,

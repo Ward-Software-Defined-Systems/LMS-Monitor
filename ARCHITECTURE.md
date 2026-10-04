@@ -142,7 +142,7 @@ The cpu_power sampler is deliberately included alongside ane_power — on M4 Max
 | hypothetical cost | 7 | per-frontier-model session-cumulative input / output / total USD |
 | footer | 1 | `q quit · r reset session · p pause` |
 
-Ollama-Monitor, the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
+[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor), the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
 
 Render tick: 250 ms. Channel reads non-blocking via `tokio::select!`. Input events arrive from a dedicated blocking thread (sync `crossterm::event::read` → mpsc → main loop).
 

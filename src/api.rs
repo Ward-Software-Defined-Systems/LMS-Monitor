@@ -129,10 +129,10 @@ mod tests {
 
     #[test]
     fn list_models_url_trims_trailing_slash() {
-        let trimmed = "http://localhost:31337/".trim_end_matches('/');
+        let trimmed = "http://localhost:1234/".trim_end_matches('/');
         assert_eq!(
             format!("{}/api/v0/models", trimmed),
-            "http://localhost:31337/api/v0/models"
+            "http://localhost:1234/api/v0/models"
         );
     }
 }

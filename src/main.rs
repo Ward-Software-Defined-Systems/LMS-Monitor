@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, watch};
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
-    /// Base URL of the LM Studio HTTP server.
-    #[arg(long, default_value = "http://localhost:31337")]
+    /// Base URL of the LM Studio HTTP server (LM Studio's default port is 1234).
+    #[arg(long, env = "LMS_BASE_URL", default_value = "http://localhost:1234")]
     base_url: String,
 
     /// Path to user config TOML (defaults to XDG / macOS app-support dir).

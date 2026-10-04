@@ -40,10 +40,10 @@ cargo install --path .         # or: put lmstudio-monitor on your PATH via ~/.ca
 ## Usage
 
 ```sh
-lmstudio-monitor --base-url http://localhost:1234
+lmstudio-monitor
 ```
 
-The default `--base-url` is `http://localhost:31337`. LM Studio's own default port is 1234, so pass `--base-url` unless you've moved the server to 31337.
+It connects to LM Studio's default address, `http://localhost:1234`. If your server listens elsewhere, pass `--base-url` or set `LMS_BASE_URL`.
 
 At launch it asks for your sudo password, used only to start `powermetrics` for the GPU and Neural Engine figures. Run it as your normal user, not under `sudo`. If sudo fails, those two figures show `n/a` and everything else still works.
 
@@ -53,7 +53,7 @@ At launch it asks for your sudo password, used only to start `powermetrics` for 
 
 | flag | default | purpose |
 |---|---|---|
-| `--base-url <URL>` | `http://localhost:31337` | LM Studio server |
+| `--base-url <URL>` | `http://localhost:1234` (env `LMS_BASE_URL`) | LM Studio server |
 | `--lms-bin <PATH>` | `~/.lmstudio/bin/lms` (env `LMS_BIN`) | the `lms` CLI |
 | `--config <PATH>` | `~/Library/Application Support/lmstudio-monitor/config.toml` | optional config file |
 | `--db <PATH>` | `~/Library/Application Support/lmstudio-monitor/usage.db` | SQLite database |
@@ -107,7 +107,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 CI ([`.gitlab-ci.yml`](.gitlab-ci.yml)) runs the same checks on Linux. [ARCHITECTURE.md](ARCHITECTURE.md) covers the module layout, data flow and design decisions.
 
-Ollama-Monitor is a sibling project that shows the same dashboard for [Ollama](https://ollama.com).
+[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor) is a sibling project that shows the same dashboard for Ollama.
 
 ## License
 
