@@ -134,10 +134,10 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        if let Ok(t) = db::lifetime_totals(&conn) {
-                            if lifetime_tx.send(t).await.is_err() {
-                                return;
-                            }
+                        if let Ok(t) = db::lifetime_totals(&conn)
+                            && lifetime_tx.send(t).await.is_err()
+                        {
+                            return;
                         }
                     }
                     _ = sd.changed() => return,
@@ -148,17 +148,16 @@ async fn main() -> Result<()> {
 
     let shutdown_tx_signal = shutdown_tx.clone();
     tokio::spawn(async move {
-        let mut sigterm = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("install SIGTERM handler failed: {e}");
-                let _ = tokio::signal::ctrl_c().await;
-                let _ = shutdown_tx_signal.send(true);
-                return;
-            }
-        };
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("install SIGTERM handler failed: {e}");
+                    let _ = tokio::signal::ctrl_c().await;
+                    let _ = shutdown_tx_signal.send(true);
+                    return;
+                }
+            };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = sigterm.recv() => {}

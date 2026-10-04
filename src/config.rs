@@ -15,14 +15,16 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let Some(p) = path else { return Ok(Self::default()) };
+        let Some(p) = path else {
+            return Ok(Self::default());
+        };
         if !p.exists() {
             return Ok(Self::default());
         }
-        let s = std::fs::read_to_string(p)
-            .with_context(|| format!("read config {}", p.display()))?;
-        let cfg: Self = toml::from_str(&s)
-            .with_context(|| format!("parse config {}", p.display()))?;
+        let s =
+            std::fs::read_to_string(p).with_context(|| format!("read config {}", p.display()))?;
+        let cfg: Self =
+            toml::from_str(&s).with_context(|| format!("parse config {}", p.display()))?;
         Ok(cfg)
     }
 

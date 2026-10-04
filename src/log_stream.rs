@@ -104,7 +104,10 @@ mod tests {
     fn expands_tilde_when_home_set() {
         // SAFETY: test process; setting HOME for the duration of this test.
         unsafe { std::env::set_var("HOME", "/tmp/fakehome") };
-        assert_eq!(expand_tilde("~/.lmstudio/bin/lms"), "/tmp/fakehome/.lmstudio/bin/lms");
+        assert_eq!(
+            expand_tilde("~/.lmstudio/bin/lms"),
+            "/tmp/fakehome/.lmstudio/bin/lms"
+        );
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
         assert_eq!(expand_tilde("relative/path"), "relative/path");
     }

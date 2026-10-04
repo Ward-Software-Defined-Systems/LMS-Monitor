@@ -114,7 +114,11 @@ mod tests {
             ("claude-opus-5", 5.00, 25.00),
         ] {
             let p = table.lookup(key).unwrap();
-            assert_eq!((p.input_per_mtok_usd, p.output_per_mtok_usd), (input, output), "{key}");
+            assert_eq!(
+                (p.input_per_mtok_usd, p.output_per_mtok_usd),
+                (input, output),
+                "{key}"
+            );
         }
 
         let gemini = table.lookup("gemini-3-1-pro").unwrap();

@@ -128,7 +128,8 @@ fn parse_gpu_active_percent(line: &str) -> Option<f32> {
 fn parse_ane_power_mw(line: &str) -> Option<f32> {
     // Expected: "ANE Power: 234 mW"  (case variants tolerated)
     let line = line.trim_start();
-    let stripped = line.strip_prefix("ANE Power:")
+    let stripped = line
+        .strip_prefix("ANE Power:")
         .or_else(|| line.strip_prefix("ANE power:"))
         .or_else(|| line.strip_prefix("ANE:"))?;
     let rest = stripped.trim_start();
@@ -295,8 +296,14 @@ mod tests {
 
     #[test]
     fn format_bytes_ratio_shares_one_unit() {
-        assert_eq!(format_bytes_ratio(38_200_000_000, 137_400_000_000), "38.2/137.4 GB");
-        assert_eq!(format_bytes_ratio(512_000_000, 137_400_000_000), "0.5/137.4 GB");
+        assert_eq!(
+            format_bytes_ratio(38_200_000_000, 137_400_000_000),
+            "38.2/137.4 GB"
+        );
+        assert_eq!(
+            format_bytes_ratio(512_000_000, 137_400_000_000),
+            "0.5/137.4 GB"
+        );
         assert_eq!(format_bytes_ratio(1_500_000, 8_000_000), "2/8 MB");
         assert_eq!(format_bytes_ratio(0, 0), "0/0 B");
     }
@@ -356,7 +363,9 @@ mod tests {
     fn parse_gpu_active_percent_apple_silicon_format() {
         // Real M4 Max format captured from `powermetrics --samplers gpu_power`:
         assert_eq!(
-            parse_gpu_active_percent("GPU HW active residency:   2.96% (338 MHz: .18% 618 MHz:   0%)"),
+            parse_gpu_active_percent(
+                "GPU HW active residency:   2.96% (338 MHz: .18% 618 MHz:   0%)"
+            ),
             Some(2.96)
         );
         assert_eq!(

@@ -55,11 +55,7 @@ pub async fn list_models(
     Ok(body.data)
 }
 
-pub async fn poll_models(
-    base_url: String,
-    interval: Duration,
-    tx: mpsc::Sender<ModelsSnapshot>,
-) {
+pub async fn poll_models(base_url: String, interval: Duration, tx: mpsc::Sender<ModelsSnapshot>) {
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -134,6 +130,9 @@ mod tests {
     #[test]
     fn list_models_url_trims_trailing_slash() {
         let trimmed = "http://localhost:31337/".trim_end_matches('/');
-        assert_eq!(format!("{}/api/v0/models", trimmed), "http://localhost:31337/api/v0/models");
+        assert_eq!(
+            format!("{}/api/v0/models", trimmed),
+            "http://localhost:31337/api/v0/models"
+        );
     }
 }

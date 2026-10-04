@@ -174,12 +174,7 @@ impl RecordBuilder {
         }
     }
 
-    fn match_input(
-        &mut self,
-        model_id: &str,
-        output_ts_ms: i64,
-        max_wall_ms: i64,
-    ) -> Option<i64> {
+    fn match_input(&mut self, model_id: &str, output_ts_ms: i64, max_wall_ms: i64) -> Option<i64> {
         let queue = self.pending.get_mut(model_id)?;
         while let Some(front) = queue.front() {
             let wall = output_ts_ms - front.timestamp_ms;
@@ -219,10 +214,10 @@ pub async fn parser_task(
                 match line {
                     Some(line) => {
                         let event = parse_line(&line);
-                        if let Some(record) = builder.ingest(event) {
-                            if record_tx.send(record).await.is_err() {
-                                return;
-                            }
+                        if let Some(record) = builder.ingest(event)
+                            && record_tx.send(record).await.is_err()
+                        {
+                            return;
                         }
                     }
                     None => return,

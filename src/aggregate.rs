@@ -72,12 +72,21 @@ impl Aggregator {
         let cutoff_5m = now - ChronoDuration::seconds(300);
         let cutoff_15m = now - ChronoDuration::seconds(900);
 
-        let recs_1m: Vec<&InferenceRecord> =
-            self.records.iter().filter(|r| r.started_at >= cutoff_1m).collect();
-        let recs_5m: Vec<&InferenceRecord> =
-            self.records.iter().filter(|r| r.started_at >= cutoff_5m).collect();
-        let recs_15m: Vec<&InferenceRecord> =
-            self.records.iter().filter(|r| r.started_at >= cutoff_15m).collect();
+        let recs_1m: Vec<&InferenceRecord> = self
+            .records
+            .iter()
+            .filter(|r| r.started_at >= cutoff_1m)
+            .collect();
+        let recs_5m: Vec<&InferenceRecord> = self
+            .records
+            .iter()
+            .filter(|r| r.started_at >= cutoff_5m)
+            .collect();
+        let recs_15m: Vec<&InferenceRecord> = self
+            .records
+            .iter()
+            .filter(|r| r.started_at >= cutoff_15m)
+            .collect();
         let recs_lifetime: Vec<&InferenceRecord> = self.records.iter().collect();
 
         let mut per_model_records: HashMap<String, Vec<&InferenceRecord>> = HashMap::new();
@@ -224,7 +233,13 @@ mod tests {
         agg.ingest(rec(now, "m", 10, 50, 100.0)); // in 1m
         agg.ingest(rec(now - ChronoDuration::seconds(120), "m", 10, 50, 100.0)); // in 5m
         agg.ingest(rec(now - ChronoDuration::seconds(600), "m", 10, 50, 100.0)); // in 15m
-        agg.ingest(rec(now - ChronoDuration::seconds(1_800), "m", 10, 50, 100.0)); // only lifetime
+        agg.ingest(rec(
+            now - ChronoDuration::seconds(1_800),
+            "m",
+            10,
+            50,
+            100.0,
+        )); // only lifetime
 
         let snap = agg.snapshot_at(now);
         assert_eq!(snap.window_1m.req_count, 1);

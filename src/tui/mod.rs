@@ -153,9 +153,7 @@ fn spawn_input_thread(tx: mpsc::Sender<KeyEvent>) {
         loop {
             match crossterm::event::read() {
                 Ok(Event::Key(k)) => {
-                    if k.kind == KeyEventKind::Press
-                        && tx.blocking_send(k).is_err()
-                    {
+                    if k.kind == KeyEventKind::Press && tx.blocking_send(k).is_err() {
                         return;
                     }
                 }
@@ -187,6 +185,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> InputControl {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     base_url: String,
     pricing: PricingTable,
@@ -295,14 +294,27 @@ mod tests {
     fn hardware_row_survives_at_minimum_height() {
         let state = sample_state();
         let lines = render_to_lines(120, 36, &state);
-        for title in ["status", "loaded models", "hardware", "live request feed", "rolling metrics", "hypothetical session cost"] {
-            assert!(lines.iter().any(|l| l.contains(title)), "panel {title:?} missing");
+        for title in [
+            "status",
+            "loaded models",
+            "hardware",
+            "live request feed",
+            "rolling metrics",
+            "hypothetical session cost",
+        ] {
+            assert!(
+                lines.iter().any(|l| l.contains(title)),
+                "panel {title:?} missing"
+            );
         }
         let hw_row = lines
             .iter()
             .find(|l| l.contains("lms cpu"))
             .expect("hardware row rendered");
-        assert!(hw_row.contains("ane  234 mW"), "hardware row clipped: {hw_row}");
+        assert!(
+            hw_row.contains("ane  234 mW"),
+            "hardware row clipped: {hw_row}"
+        );
         assert!(lines.last().unwrap().contains("q quit"), "footer missing");
     }
 }

@@ -43,15 +43,18 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create db parent {}", parent.display()))?;
     }
-    let conn = Connection::open(path)
-        .with_context(|| format!("open sqlite at {}", path.display()))?;
+    let conn =
+        Connection::open(path).with_context(|| format!("open sqlite at {}", path.display()))?;
     conn.execute_batch(SCHEMA_SQL).context("apply schema")?;
     Ok(conn)
 }
 
 pub fn start_session(conn: &Connection) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
-    conn.execute("INSERT INTO sessions (started_at) VALUES (?1)", params![now])?;
+    conn.execute(
+        "INSERT INTO sessions (started_at) VALUES (?1)",
+        params![now],
+    )?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -94,8 +97,7 @@ pub struct LifetimeTotals {
 }
 
 pub fn lifetime_totals(conn: &Connection) -> Result<LifetimeTotals> {
-    let session_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+    let session_count: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
     let (record_count, total_prompt_tokens, total_gen_tokens): (i64, i64, i64) = conn.query_row(
         "SELECT COUNT(*),
                 COALESCE(SUM(prompt_tokens), 0),
