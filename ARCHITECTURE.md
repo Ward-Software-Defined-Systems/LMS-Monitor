@@ -57,7 +57,7 @@ One OS process, one `tokio` multi-thread runtime. Tasks communicate through boun
 
 ## Event source — the design pivot
 
-Spec §LOCKED DECISION 6 originally chose `lms log stream -s runtime`. Step 0 verification ([`STEP-0-FINDINGS.md`](./STEP-0-FINDINGS.md)) showed that source emits **8 lines of pure diagnostics for 3 chat completions** — no timings, no token counts, no task IDs.
+The original design read `lms log stream -s runtime`. Captured against real traffic, that source emitted **8 lines of pure diagnostics for 3 chat completions** — no timings, no token counts, no task IDs (see `fixtures/lms-log-source-runtime-mlx.txt`).
 
 The actually-useful source is `lms log stream -s model --stats --json`, which emits JSON-Lines envelopes:
 
@@ -100,7 +100,7 @@ Sessions are stamped on app start (`started_at`); `ended_at` is filled on gracef
 
 ## Pricing
 
-[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time. Rates updated 2026-10-03 (the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). The six frontier model keys are constant:
+[`pricing.toml`](./pricing.toml) is `include_str!`-baked at compile time (list prices, updated 2026-10-03). The six frontier model keys are constant:
 
 ```rust
 pub const FRONTIER_MODELS: &[&str] = &[
@@ -113,7 +113,7 @@ pub const FRONTIER_MODELS: &[&str] = &[
 ];
 ```
 
-Pricing is flat-rate; long-context tier (Gemini >200K) is a deferred concern flagged in STEP-0-FINDINGS. User config at `$XDG_CONFIG_HOME/lmstudio-monitor/config.toml` overrides.
+Pricing is flat-rate; long-context tiers (e.g. Gemini above 200K prompt tokens) aren't modelled. User config at `$XDG_CONFIG_HOME/lmstudio-monitor/config.toml` (macOS: `~/Library/Application Support/lmstudio-monitor/config.toml`) overrides.
 
 ## Hardware sampling
 
@@ -142,7 +142,7 @@ The cpu_power sampler is deliberately included alongside ane_power — on M4 Max
 | hypothetical cost | 7 | per-frontier-model session-cumulative input / output / total USD |
 | footer | 1 | `q quit · r reset session · p pause` |
 
-Ollama-Monitor (`../Ollama-Monitor`) ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
+Ollama-Monitor, the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
 
 Render tick: 250 ms. Channel reads non-blocking via `tokio::select!`. Input events arrive from a dedicated blocking thread (sync `crossterm::event::read` → mpsc → main loop).
 
@@ -165,7 +165,6 @@ Terminal restore is bracketed by:
 
 ## Reference files
 
-- [`LMS-MONITOR-01.md`](./LMS-MONITOR-01.md) — original spec
-- [`STEP-0-FINDINGS.md`](./STEP-0-FINDINGS.md) — what diverged from the spec and why
+- [`README.md`](./README.md) — usage, install, troubleshooting
 - [`pricing.toml`](./pricing.toml) — baked-in frontier defaults
 - [`fixtures/`](./fixtures) — captured API + log samples used by parser/aggregator tests

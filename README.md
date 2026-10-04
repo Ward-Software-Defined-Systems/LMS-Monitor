@@ -1,76 +1,75 @@
-# lmstudio-monitor
+# LMS-Monitor
 
-A standalone Rust TUI that passively observes [LM Studio](https://lmstudio.ai) inference activity on `localhost` and surfaces:
+A terminal dashboard for [LM Studio](https://lmstudio.ai) on macOS. It watches your local inference as it happens (every request's tokens, time to first token and throughput), shows what the same tokens would have cost on frontier APIs, and keeps live Apple Silicon hardware telemetry alongside.
 
-- **Live request feed** — last 30 completed inferences (timestamp, model, prompt/gen tokens, TTFT, tok/s, stop reason)
-- **Rolling throughput** — 1m / 5m / 15m / session-lifetime windows, per-model
-- **Hypothetical frontier cost** — Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Gemini 3.1 Pro priced against the local token counts
-- **Hardware** — system + LM Studio process tree CPU%, memory, GPU active residency, ANE power
+![LMS-Monitor running in a terminal](assets/LMS-Monitor.png)
 
-No real frontier API calls — costs come from a baked-in pricing table. No daemon. Single binary. Local SQLite for cross-session totals.
+It's passive: it reads LM Studio's own stats stream and never sits in the request path, so nothing about how you call LM Studio changes.
 
-## Status
+## Features
 
-v0.1.0. Implements [`LMS-MONITOR-01`](./LMS-MONITOR-01.md). Step 0 verification + the architectural pivot from `lms log stream -s runtime` to `-s model --stats --json` are documented in [`STEP-0-FINDINGS.md`](./STEP-0-FINDINGS.md).
+- **Live request feed**: the last 30 completed requests with time, model, prompt and generated tokens, time to first token, tokens per second and stop reason.
+- **Models**: every downloaded model with its type, format, quantization, context length and load state; `▸` marks the model the last request went to.
+- **Rolling metrics**: requests, tokens, mean and p95 tokens per second, and mean time to first token over the last 1, 5 and 15 minutes and the whole session.
+- **Hypothetical cost**: your session's token counts priced at list rates for Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8 and Gemini 3.1 Pro.
+- **Hardware**: system CPU and memory, CPU and memory of the LM Studio process tree, GPU active residency and Neural Engine power.
+- **History**: lifetime request and token totals across sessions, kept in a local SQLite database.
+
+## How it works
+
+LM Studio publishes per-prediction stats on its log stream. LMS-Monitor runs `lms log stream -s model --stats --json` as a subprocess and reads it line by line, and polls the server's `/api/v0/models` endpoint every 2 seconds for the model list. Hardware figures come from [`sysinfo`](https://crates.io/crates/sysinfo) and from macOS's `powermetrics`, which needs sudo.
+
+**Privacy:** the database stores only per-request metadata (model, token counts, timings), never prompt or response text. Nothing leaves your machine; the cost figures come from a pricing table compiled into the binary.
 
 ## Requirements
 
-- macOS (Apple Silicon recommended for GPU/ANE telemetry)
-- LM Studio installed; embedded HTTP server enabled (Developer tab → "Start Server")
-- `lms` CLI bundled with LM Studio at `~/.lmstudio/bin/lms` (run `~/.lmstudio/bin/lms bootstrap` once if you want it on PATH; not required by this app)
-- Rust 1.94+ (2024 edition)
-- `sudo` access for the GPU/ANE row (`powermetrics` requires elevation; you'll be prompted once per launch)
+- macOS. Apple Silicon is recommended: the GPU and Neural Engine figures come from `powermetrics`.
+- LM Studio with its local server running (Developer tab → Start Server). The `lms` CLI ships with LM Studio at `~/.lmstudio/bin/lms` and doesn't need to be on your `PATH`.
+- Rust 1.94 or newer, to build.
+- sudo, for the GPU and Neural Engine figures only.
 
-## Build
+## Install
 
-```sh
-cargo build --release
-# Produces target/release/lmstudio-monitor (~8.3 MB)
-```
-
-## Run
+Clone the repository, then from its directory:
 
 ```sh
-target/release/lmstudio-monitor
+cargo build --release          # binary at target/release/lmstudio-monitor
+cargo install --path .         # or: put lmstudio-monitor on your PATH via ~/.cargo/bin
 ```
 
-You'll be prompted for your sudo password — used solely to spawn `powermetrics --samplers cpu_power,gpu_power,ane_power -i 2000`. The TUI then opens.
-
-If you'd rather skip GPU/ANE and avoid the prompt, use headless mode (which doesn't render the panel):
+## Usage
 
 ```sh
-target/release/lmstudio-monitor --no-tui
+lmstudio-monitor --base-url http://localhost:1234
 ```
+
+The default `--base-url` is `http://localhost:31337`. LM Studio's own default port is 1234, so pass `--base-url` unless you've moved the server to 31337.
+
+At launch it asks for your sudo password, used only to start `powermetrics` for the GPU and Neural Engine figures. Run it as your normal user, not under `sudo`. If sudo fails, those two figures show `n/a` and everything else still works.
+
+`--no-tui` runs headless instead: one summary line per request on stderr, still recorded to the database, and no sudo prompt.
 
 ### Flags
 
 | flag | default | purpose |
 |---|---|---|
-| `--base-url <URL>` | `http://localhost:31337` | LM Studio HTTP server |
-| `--config <PATH>` | XDG / macOS app-support dir | optional user config TOML |
-| `--db <PATH>` | XDG / macOS app-support dir | SQLite usage DB |
-| `--lms-bin <PATH>` | `~/.lmstudio/bin/lms` (env `LMS_BIN`) | path to the `lms` CLI binary |
-| `--no-tui` | off | headless: print one summary line per completed inference to stderr |
+| `--base-url <URL>` | `http://localhost:31337` | LM Studio server |
+| `--lms-bin <PATH>` | `~/.lmstudio/bin/lms` (env `LMS_BIN`) | the `lms` CLI |
+| `--config <PATH>` | `~/Library/Application Support/lmstudio-monitor/config.toml` | optional config file |
+| `--db <PATH>` | `~/Library/Application Support/lmstudio-monitor/usage.db` | SQLite database |
+| `--no-tui` | off | headless mode |
 
-### Keys (TUI)
+### Keys
 
 | key | action |
 |---|---|
-| `q` / `Ctrl-C` | quit (terminal restored, session closed in DB) |
-| `r` | reset session counters (records remain in DB) |
-| `p` | pause UI updates (records still persist) |
+| `q` or `Ctrl-C` | quit |
+| `r` | reset the session counters (the database keeps everything) |
+| `p` | pause the display (requests are still recorded) |
 
-## File locations (macOS)
+## Configuration
 
-- DB: `~/Library/Application Support/lmstudio-monitor/usage.db`
-- App log: `~/Library/Application Support/lmstudio-monitor/lmstudio-monitor.log`
-- User config (optional): `~/Library/Application Support/lmstudio-monitor/config.toml`
-
-Set `LMS_LOG=debug` (or `trace`) to crank tracing detail in the log file. `trace` includes raw `powermetrics` lines, useful for diagnosing GPU/ANE parsing issues.
-
-## Override pricing
-
-Defaults are baked in from the values in [`pricing.toml`](./pricing.toml) (rates updated 2026-07-09; the original snapshot is [STEP-0-FINDINGS §0.5](./STEP-0-FINDINGS.md#05--frontier-pricing-snapshot-per-1m-tokens-usd)). To override, drop a TOML file at `~/Library/Application Support/lmstudio-monitor/config.toml`:
+Prices live in [`pricing.toml`](pricing.toml) and are compiled in. To change one, add an override to `~/Library/Application Support/lmstudio-monitor/config.toml`:
 
 ```toml
 [pricing.providers.anthropic.models.claude-opus-4-8]
@@ -78,20 +77,40 @@ input_per_mtok_usd  = 5.00
 output_per_mtok_usd = 25.00
 ```
 
+The cost panel is a rough comparison, not a quote. It applies list prices to your local model's token counts (a frontier model would tokenize the same text differently), and it ignores prompt caching, batch discounts and long-context pricing tiers.
+
+## Files
+
+| file | location |
+|---|---|
+| database | `~/Library/Application Support/lmstudio-monitor/usage.db` |
+| log | `~/Library/Application Support/lmstudio-monitor/lmstudio-monitor.log` |
+| config (optional) | `~/Library/Application Support/lmstudio-monitor/config.toml` |
+
+Set `LMS_LOG=debug` or `LMS_LOG=trace` for more detail in the log; `trace` includes the raw `powermetrics` output.
+
 ## Troubleshooting
 
 | symptom | check |
 |---|---|
-| "server: ●unreachable" | LM Studio's "Start Server" toggle (Developer tab); `~/.lmstudio/bin/lms server status` |
-| GPU or ANE shows `n/a` | `LMS_LOG=trace` then `grep powermetrics ~/Library/Application\ Support/lmstudio-monitor/lmstudio-monitor.log` — the parser tolerates label variants but isn't psychic |
-| no records appear despite traffic | the model source needs `lms log stream -s model --stats --json`; verify with `~/.lmstudio/bin/lms --version` |
-| sudo prompt fails / app exits | sudo cache may be stale; run `sudo -v` once before launching, or use `--no-tui` to skip the powermetrics path |
+| header shows `server: ● unreachable` | Is the LM Studio server running (`~/.lmstudio/bin/lms server status`)? Is `--base-url` pointing at its port? |
+| no requests appear | `~/.lmstudio/bin/lms log stream -s model --stats --json` should print a JSON line per prediction; if it doesn't, update LM Studio. |
+| GPU or ANE shows `n/a` | Run with `LMS_LOG=trace` and search the log for `powermetrics`. |
+| sudo prompt fails | Run `sudo -v` first, or use `--no-tui`. |
 
 ## Development
 
 ```sh
-cargo test          # 44 tests (parser, aggregator, pricing, db, hardware sampler, TUI layout)
-cargo run -- --help
+cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for module layout, data flow, and design decisions.
+CI ([`.gitlab-ci.yml`](.gitlab-ci.yml)) runs the same checks on Linux. [ARCHITECTURE.md](ARCHITECTURE.md) covers the module layout, data flow and design decisions.
+
+Ollama-Monitor is a sibling project that shows the same dashboard for [Ollama](https://ollama.com).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
+
+LMS-Monitor is an independent project, not affiliated with or endorsed by LM Studio, Anthropic or Google.
