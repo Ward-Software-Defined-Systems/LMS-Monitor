@@ -209,14 +209,16 @@ If any step fails, a warning goes to the log and GPU/ANE show `n/a`; the TUI sti
 | header | 3 | name · server status and URL · `err:` text when unreachable · `[PAUSED]` · lifetime reqs / sessions / prompt tok / gen tok · local clock |
 | loaded models | 6 | id · type · compat · quant · max ctx · state, with `▸` on the most recent request's model. Lists every downloaded model, but only 3 rows fit |
 | hardware | 3 | one line: system CPU/MEM │ LM Studio CPU/RSS/process count │ GPU/ANE (macOS) or GPU/VRAM (Linux), picked with `cfg!` so both arms type-check everywhere |
-| live feed | `Min(7)` | last 30 entries, newest first in arrival order: completed requests (by start time) and refusals (by refusal time). Red marks context overflow: a `contextLengthReached` stop cell, or a whole `rejected (ctx N)` row with the refused prompt's size. Shows terminal height − 32 of them, no scrolling |
+| live feed | `Min(7)` | last 30 entries, newest first in arrival order: completed requests (by start time) and refusals (by refusal time). Red marks context overflow: the stop cell of a reply that filled the context (see below), or a whole `rejected (ctx N)` row with the refused prompt's size. Shows terminal height − 32 of them, no scrolling |
 | rolling metrics | 9 | columns 1m / 5m / 15m / session; rows: requests, prompt tok, gen tok, mean tok/s, p95 tok/s, mean TTFT |
 | hypothetical cost | 7 | per frontier model: session input / output / total USD |
 | footer | 1 | `q quit · r reset session · p pause` |
 
 The fixed panels take 29 rows and the feed at least 7, so 36 rows is the minimum (`hardware_row_survives_at_minimum_height` renders 120×36). Every panel fits in 120 columns except the header, which needs about 145 even with zero totals; its clock is the first thing cut off.
 
-[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor), the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together. The red feed rows are the same idea for different events: context-overflow refusals here (`FeedEntry::Rejected`, `rejected_row`) and failed requests (a 4xx or 5xx response) in Ollama-Monitor (`FeedEntry::Failed`, `failed_row`). The red `contextLengthReached` stop cell (`stop_cell`) stays LMS-only, since no Ollama stop reason means the context ran out.
+A reply filled the context when it stopped with `contextLengthReached`, or with `maxPredictedTokensReached` and prompt plus generated tokens of at least the model's loaded context length. Both context-full replies seen so far came the second way: an MLX model whose requests set no `max_tokens` stopped at exactly its 262,144-token context. Below the context, `maxPredictedTokensReached` is an ordinary output cap and stays plain. `AppState::ingest_record` looks the loaded context length up in the latest `/api/v0/models` snapshot and keeps it on the `FeedEntry::Completed`, so a red row stays red after its model unloads.
+
+[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor), the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together. The red feed rows are the same idea for different events: context-overflow refusals here (`FeedEntry::Rejected`, `rejected_row`) and failed requests (a 4xx or 5xx response) in Ollama-Monitor (`FeedEntry::Failed`, `failed_row`). The red stop cell for a reply that filled the context (`stop_cell`, `filled_context`) is LMS-only so far.
 
 The loop draws, then waits in `tokio::select!` for the first of: the 250 ms tick, a key, or a message on any channel. Channel arms match `Some(x) = rx.recv()`, so a closed channel disables its arm instead of spinning the loop. Keys come from a plain thread blocked in `crossterm::event::read`, which forwards key presses over a channel.
 
@@ -252,7 +254,7 @@ Terminal handling:
 | `pricing`, `config` | baked rates, cost arithmetic, per-model override merging |
 | `api` | `/api/v0/models` parsing against captured responses |
 | `hardware` | both backends' parsers and states (powermetrics lines, nvidia-smi CSV), readings clearing when either child exits, process matching on path, argv[0] and name hints, byte formatting, a live `sysinfo` sample |
-| `tui` | rendering into ratatui's `TestBackend`: every panel at 120×36, the one-line hardware row with its macOS or Linux tail, a partial pricing override, red overflow cells and rows, feed order, rejections under pause |
+| `tui` | rendering into ratatui's `TestBackend`: every panel at 120×36, the one-line hardware row with its macOS or Linux tail, a partial pricing override, red overflow cells and rows (including a token cap that filled the context), feed order, rejections under pause |
 
 The fixtures are real LM Studio captures. The `api` and `parser` tests load them; `lms-log-source-runtime-mlx.txt` is kept only as evidence for the event-source pivot. The `server_log` tests use verbatim server-log lines inline instead of a captured file, because a raw server log holds private request bodies.
 
@@ -275,6 +277,7 @@ CI builds with `rust:1.97`, so the declared minimum, Rust 1.94, isn't exercised.
 - LM Studio's home is taken to be `~/.lmstudio`. A home moved with `~/.lmstudio-home-pointer`, the legacy `~/.cache/lm-studio` or the Flatpak's `~/.var/app/ai.lmstudio.lm-studio/.lmstudio` isn't followed: pass `--lms-bin` and `--server-log-dir`. Process matching still finds most of its processes by name, but not the `node` worker.
 - Nothing in the UI shows whether the server-log folder was found; the log says `server log folder …` when it can't be read. Refusals appear up to a second late, stamped to the second in local time.
 - `stop_reason` is NULL on rows recorded before v2 or by an older binary sharing the database.
+- A `maxPredictedTokensReached` reply is red only if the last models poll listed its model with a loaded context length, and only if it reached that length, as both MLX cases did. An engine that stops a few tokens short isn't flagged. The database keeps the raw stop reason but not the context length, and `--no-tui` mode prints the stop reason alone.
 - The 2 s `/api/v0/models` poll is most of what LM Studio writes to its server log, since it logs every request and the full JSON response: about 48 MiB a day while the monitor runs.
 
 ## Reference files

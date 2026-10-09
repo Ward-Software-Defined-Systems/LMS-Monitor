@@ -161,7 +161,12 @@ pub fn render_models(
 /// didn't fit the model's loaded context.
 #[derive(Debug, Clone)]
 pub enum FeedEntry {
-    Completed(InferenceRecord),
+    /// `loaded_context` is the model's loaded context length when the record arrived, if
+    /// `/api/v0/models` listed one.
+    Completed {
+        record: InferenceRecord,
+        loaded_context: Option<u64>,
+    },
     Rejected(ContextRejection),
 }
 
@@ -185,7 +190,10 @@ pub fn render_feed(f: &mut Frame, area: Rect, feed: &VecDeque<FeedEntry>) {
     let rows: Vec<Row> = feed
         .iter()
         .map(|entry| match entry {
-            FeedEntry::Completed(r) => completed_row(r),
+            FeedEntry::Completed {
+                record,
+                loaded_context,
+            } => completed_row(record, *loaded_context),
             FeedEntry::Rejected(r) => rejected_row(r),
         })
         .collect();
@@ -210,10 +218,27 @@ pub fn render_feed(f: &mut Frame, area: Rect, feed: &VecDeque<FeedEntry>) {
 /// LM Studio's stop reason when generation runs into the loaded context's limit.
 const CONTEXT_FULL_STOP: &str = "contextLengthReached";
 
+/// LM Studio's stop reason when a reply reaches its token cap. Seen with MLX: a reply to
+/// a request without `max_tokens` that fills the context ends with this, not
+/// `contextLengthReached`.
+const TOKEN_CAP_STOP: &str = "maxPredictedTokensReached";
+
 /// Feed rows and cells that show context overflow use this colour.
 const OVERFLOW: Color = Color::Red;
 
-fn completed_row(r: &InferenceRecord) -> Row<'static> {
+/// Whether a reply filled its model's loaded context. Below the context, a token cap is an
+/// ordinary output cap.
+fn filled_context(r: &InferenceRecord, loaded_context: Option<u64>) -> bool {
+    match r.stop_reason.as_deref() {
+        Some(CONTEXT_FULL_STOP) => true,
+        Some(TOKEN_CAP_STOP) => {
+            loaded_context.is_some_and(|ctx| r.prompt_tokens + r.gen_tokens >= ctx)
+        }
+        _ => false,
+    }
+}
+
+fn completed_row(r: &InferenceRecord, loaded_context: Option<u64>) -> Row<'static> {
     let stop = r.stop_reason.as_deref().unwrap_or("-");
     Row::new(vec![
         Cell::from(local_hms(&r.started_at)),
@@ -222,7 +247,7 @@ fn completed_row(r: &InferenceRecord) -> Row<'static> {
         Cell::from(r.gen_tokens.to_string()),
         Cell::from(format!("{:.0}ms", r.ttft_ms)),
         Cell::from(format!("{:.1}", r.tokens_per_second)),
-        stop_cell(stop, stop == CONTEXT_FULL_STOP),
+        stop_cell(stop, filled_context(r, loaded_context)),
     ])
 }
 

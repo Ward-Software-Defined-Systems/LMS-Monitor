@@ -83,7 +83,16 @@ impl AppState {
             return;
         }
         self.last_inference_model_id = Some(rec.model_id.clone());
-        self.push_feed(FeedEntry::Completed(rec.clone()));
+        // Taken now, while the model that just answered is still loaded; it may unload later.
+        let loaded_context = self
+            .models
+            .iter()
+            .find(|m| m.id == rec.model_id)
+            .and_then(|m| m.loaded_context_length);
+        self.push_feed(FeedEntry::Completed {
+            record: rec.clone(),
+            loaded_context,
+        });
         self.aggregator.ingest(rec);
     }
 
@@ -345,6 +354,22 @@ mod tests {
         }
     }
 
+    fn loaded_model(id: &str, context: u64) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            object: "model".into(),
+            kind: Some("llm".into()),
+            publisher: None,
+            arch: None,
+            compatibility_type: Some("mlx".into()),
+            quantization: None,
+            state: "loaded".into(),
+            max_context_length: Some(context),
+            loaded_context_length: Some(context),
+            capabilities: None,
+        }
+    }
+
     fn rejection(model: &str) -> ContextRejection {
         ContextRejection {
             model_id: model.into(),
@@ -444,6 +469,49 @@ mod tests {
                 assert_eq!(cell.fg, Color::Red, "column {x} of {row:?}");
             }
         }
+    }
+
+    /// Both context-full replies seen from LM Studio with MLX ended
+    /// `maxPredictedTokensReached` at exactly the loaded context (259,773 + 2,371 =
+    /// 262,144). One token short, the same stop reason is an ordinary output cap.
+    #[test]
+    fn token_cap_at_the_context_limit_is_red() {
+        let models = || ModelsSnapshot::Loaded(vec![loaded_model("model-a", 262_144)]);
+        let capped = |gen_tokens| InferenceRecord {
+            prompt_tokens: 259_773,
+            gen_tokens,
+            ..record("model-a", Some("maxPredictedTokensReached"))
+        };
+        let stop_is_red = |state: &AppState| {
+            let colors = fg_of(&render_buffer(120, 36, state), "maxPredictedTokensReached");
+            assert!(
+                colors.iter().all(|c| *c == Color::Red) || colors.iter().all(|c| *c != Color::Red),
+                "partly red: {colors:?}"
+            );
+            colors[0] == Color::Red
+        };
+
+        let mut state = sample_state();
+        state.ingest_models(models());
+        state.ingest_record(capped(2_371));
+        assert!(stop_is_red(&state), "a full context isn't red");
+        // The context was taken when the record arrived, so the row stays red after
+        // the model unloads.
+        state.ingest_models(ModelsSnapshot::Loaded(Vec::new()));
+        assert!(
+            stop_is_red(&state),
+            "the row lost its red when the model unloaded"
+        );
+
+        let mut state = sample_state();
+        state.ingest_models(models());
+        state.ingest_record(capped(2_370));
+        assert!(!stop_is_red(&state), "an ordinary output cap is red");
+
+        // With no loaded context to compare against, nothing is flagged.
+        let mut state = sample_state();
+        state.ingest_record(capped(2_371));
+        assert!(!stop_is_red(&state), "red without a known context");
     }
 
     #[test]
