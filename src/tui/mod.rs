@@ -24,8 +24,9 @@ use crate::db::{DbHandle, LifetimeTotals};
 use crate::hardware::HardwareSnapshot;
 use crate::parser::InferenceRecord;
 use crate::pricing::PricingTable;
+use crate::server_log::ContextRejection;
 
-use widgets::ServerStatus;
+use widgets::{FeedEntry, ServerStatus};
 
 const FEED_CAPACITY: usize = 30;
 
@@ -33,7 +34,8 @@ pub struct AppState {
     pub base_url: String,
     pub aggregator: Aggregator,
     pub pricing: PricingTable,
-    pub recent: VecDeque<InferenceRecord>,
+    /// Newest first.
+    pub feed: VecDeque<FeedEntry>,
     pub models: Vec<ModelInfo>,
     pub server_status: ServerStatus,
     pub server_error: Option<String>,
@@ -50,7 +52,7 @@ impl AppState {
             base_url,
             aggregator: Aggregator::new(),
             pricing,
-            recent: VecDeque::with_capacity(FEED_CAPACITY),
+            feed: VecDeque::with_capacity(FEED_CAPACITY),
             models: Vec::new(),
             server_status: ServerStatus::Unknown,
             server_error: None,
@@ -81,15 +83,29 @@ impl AppState {
             return;
         }
         self.last_inference_model_id = Some(rec.model_id.clone());
-        if self.recent.len() == FEED_CAPACITY {
-            self.recent.pop_front();
-        }
-        self.recent.push_back(rec.clone());
+        self.push_feed(FeedEntry::Completed(rec.clone()));
         self.aggregator.ingest(rec);
     }
 
+    /// A request LM Studio refused before running it. It only goes in the feed: nothing
+    /// ran, so there's nothing for the rolling metrics or the cost panel.
+    pub fn ingest_rejection(&mut self, rej: ContextRejection) {
+        if self.paused {
+            return;
+        }
+        self.last_inference_model_id = Some(rej.model_id.clone());
+        self.push_feed(FeedEntry::Rejected(rej));
+    }
+
+    fn push_feed(&mut self, entry: FeedEntry) {
+        if self.feed.len() == FEED_CAPACITY {
+            self.feed.pop_back();
+        }
+        self.feed.push_front(entry);
+    }
+
     pub fn reset_session(&mut self) {
-        self.recent.clear();
+        self.feed.clear();
         self.aggregator.reset_session();
         self.session_started_at = Utc::now();
     }
@@ -119,8 +135,7 @@ fn render(f: &mut ratatui::Frame, state: &AppState) {
         state.last_inference_model_id.as_deref(),
     );
     widgets::render_hardware(f, l.hardware, &state.hardware);
-    let recent: Vec<InferenceRecord> = state.recent.iter().cloned().collect();
-    widgets::render_feed(f, l.feed, &recent);
+    widgets::render_feed(f, l.feed, &state.feed);
     let snap = state.aggregator.snapshot();
     widgets::render_rolling(f, l.rolling, &snap);
     widgets::render_costs(f, l.costs, &snap, &state.pricing);
@@ -191,6 +206,7 @@ pub async fn run(
     pricing: PricingTable,
     mut models_rx: mpsc::Receiver<ModelsSnapshot>,
     mut record_rx: mpsc::Receiver<InferenceRecord>,
+    mut rejection_rx: mpsc::Receiver<ContextRejection>,
     mut lifetime_rx: mpsc::Receiver<LifetimeTotals>,
     mut hardware_rx: mpsc::Receiver<HardwareSnapshot>,
     mut shutdown: watch::Receiver<bool>,
@@ -231,6 +247,12 @@ pub async fn run(
                 }
                 state.ingest_record(rec);
             }
+            Some(rej) = rejection_rx.recv() => {
+                if let Some(sink) = &record_sink {
+                    sink.insert_rejection(rej.clone()).await;
+                }
+                state.ingest_rejection(rej);
+            }
             Some(totals) = lifetime_rx.recv() => {
                 state.lifetime = totals;
             }
@@ -251,6 +273,8 @@ pub async fn run(
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
 
     fn sample_state() -> AppState {
         let mut state = AppState::new("http://localhost:1234".into(), PricingTable::defaults());
@@ -268,10 +292,14 @@ mod tests {
         state
     }
 
-    fn render_to_lines(width: u16, height: u16, state: &AppState) -> Vec<String> {
+    fn render_buffer(width: u16, height: u16, state: &AppState) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| render(f, state)).unwrap();
-        let buf = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_to_lines(width: u16, height: u16, state: &AppState) -> Vec<String> {
+        let buf = render_buffer(width, height, state);
         (0..buf.area.height)
             .map(|y| {
                 (0..buf.area.width)
@@ -279,6 +307,50 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// Column and row of the first rendered occurrence of `needle`. Border characters are
+    /// several bytes long, so the byte offset is converted to a column count.
+    fn find(buf: &Buffer, needle: &str) -> (u16, u16) {
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if let Some(i) = row.find(needle) {
+                return (row[..i].chars().count() as u16, y);
+            }
+        }
+        panic!("{needle:?} not rendered");
+    }
+
+    /// Foreground colour of each cell `needle` covers.
+    fn fg_of(buf: &Buffer, needle: &str) -> Vec<Color> {
+        let (x0, y) = find(buf, needle);
+        (x0..x0 + needle.chars().count() as u16)
+            .map(|x| buf[(x, y)].fg)
+            .collect()
+    }
+
+    fn record(model: &str, stop_reason: Option<&str>) -> InferenceRecord {
+        InferenceRecord {
+            model_id: model.into(),
+            started_at: Utc::now(),
+            prompt_tokens: 1_000,
+            gen_tokens: 50,
+            ttft_ms: 120.0,
+            gen_ms: 500.0,
+            total_ms: 620.0,
+            tokens_per_second: 100.0,
+            stop_reason: stop_reason.map(str::to_string),
+            num_gpu_layers: None,
+        }
+    }
+
+    fn rejection(model: &str) -> ContextRejection {
+        ContextRejection {
+            model_id: model.into(),
+            at: Utc::now(),
+            input_tokens: Some(359_277),
+            context_length: Some(262_144),
+        }
     }
 
     /// The layout's fixed panels sum to 29 rows and the feed needs 7, so 36 rows is the
@@ -332,5 +404,78 @@ mod tests {
             !lines.iter().any(|l| l.contains("(no rate)")),
             "a cost column lost its rate"
         );
+    }
+
+    #[test]
+    fn context_overflow_is_red_in_feed() {
+        let mut state = sample_state();
+        state.ingest_record(record("model-full", Some("contextLengthReached")));
+        state.ingest_record(record("model-done", Some("eosFound")));
+        state.ingest_rejection(rejection("model-refused"));
+        let buf = render_buffer(120, 36, &state);
+        assert!(
+            fg_of(&buf, "contextLengthReached")
+                .iter()
+                .all(|c| *c == Color::Red),
+            "contextLengthReached isn't red"
+        );
+        assert!(
+            fg_of(&buf, "model-full").iter().all(|c| *c != Color::Red),
+            "only the stop cell of a context-full row should be red"
+        );
+        assert!(
+            fg_of(&buf, "eosFound").iter().all(|c| *c != Color::Red),
+            "a normal stop reason is red"
+        );
+
+        // A refused request's whole row is red, inside the panel's borders.
+        let (_, y) = find(&buf, "rejected (ctx 262144)");
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        assert!(
+            row.contains("model-refused") && row.contains("359277"),
+            "{row}"
+        );
+        for x in 1..buf.area.width - 1 {
+            let cell = &buf[(x, y)];
+            if cell.symbol() != " " {
+                assert_eq!(cell.fg, Color::Red, "column {x} of {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejection_ingest_respects_pause_cap_and_aggregator() {
+        let mut state = sample_state();
+        state.toggle_pause();
+        state.ingest_rejection(rejection("while-paused"));
+        assert!(
+            state.feed.is_empty(),
+            "a rejection reached the feed while paused"
+        );
+        assert_eq!(state.last_inference_model_id, None);
+        state.toggle_pause();
+        for _ in 0..FEED_CAPACITY + 5 {
+            state.ingest_rejection(rejection("m"));
+        }
+        assert_eq!(state.feed.len(), FEED_CAPACITY);
+        assert_eq!(state.last_inference_model_id.as_deref(), Some("m"));
+        assert_eq!(
+            state.aggregator.snapshot().session_lifetime.req_count,
+            0,
+            "a rejection counted as a request"
+        );
+    }
+
+    #[test]
+    fn feed_is_newest_first() {
+        let mut state = sample_state();
+        state.ingest_record(record("older-model", Some("eosFound")));
+        state.ingest_rejection(rejection("newer-model"));
+        assert!(matches!(
+            &state.feed[0],
+            FeedEntry::Rejected(r) if r.model_id == "newer-model"
+        ));
+        let buf = render_buffer(120, 36, &state);
+        assert!(find(&buf, "newer-model").1 < find(&buf, "older-model").1);
     }
 }

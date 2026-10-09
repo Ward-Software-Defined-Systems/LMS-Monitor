@@ -22,7 +22,10 @@ One OS process running a multi-thread `tokio` runtime, plus two child processes 
           │     api::poll_models                  hardware::run_sampler
           │     GET /api/v0/models, 2 s           sysinfo, 2 s
           │           │ models (8)                         │ hardware (4)
-          ▼           ▼                                    ▼
+          │           │   server_log::run                  │
+          │           │   tails server-logs, 1 s           │
+          │           │     │ rejections (16)              │
+          ▼           ▼     ▼                              ▼
  ┌──────────────────────────────────────────────────────────────────────┐
  │ UI loop, inline in main: tui::run, or run_headless with --no-tui     │
  │ redraws on a 250 ms tick and after every message                     │
@@ -37,13 +40,13 @@ One OS process running a multi-thread `tokio` runtime, plus two child processes 
  signal task: SIGINT / SIGTERM ──▶ shutdown watch<bool>
 ```
 
-In `--no-tui` mode, `run_headless` consumes only the records; `main` drops the hardware and lifetime receivers so those tasks stop at their first send, and powermetrics isn't started.
+In `--no-tui` mode, `run_headless` consumes only the records and rejections; `main` drops the hardware and lifetime receivers so those tasks stop at their first send, and powermetrics isn't started.
 
 ### Shutdown
 
 `q` or Ctrl-C in the TUI (raw mode delivers Ctrl-C as a key, not SIGINT), or SIGINT or SIGTERM, ends the UI loop. Then `main`:
 
-1. sets the shutdown `watch`, which `log_stream` (it kills `lms`), the hardware sampler and the lifetime poller listen to;
+1. sets the shutdown `watch`, which `log_stream` (it kills `lms`), the server-log tailer, the hardware sampler and the lifetime poller listen to;
 2. queues `DbCommand::Shutdown` behind any pending inserts; the writer stamps `sessions.ended_at` and exits;
 3. sends SIGTERM to the powermetrics `sudo`, which relays it, and waits up to 2 s;
 4. sleeps 50 ms so the writer can finish, then exits.
@@ -58,9 +61,10 @@ The API poller and the parser stop when their channels close, the powermetrics r
 | `src/api.rs` | `GET /api/v0/models` client (1 s connect, 3 s total timeout); `poll_models` task; `ModelsSnapshot::{Loaded, Unreachable}` |
 | `src/log_stream.rs` | runs `lms log stream -s model --stats --json`; restarts it with backoff 1 → 2 → 4 → … → 30 s |
 | `src/parser.rs` | JSON-Lines event parser; `RecordBuilder` pairs start and stats events per model and evicts stale starts |
+| `src/server_log.rs` | follows LM Studio's server log for context-overflow rejections: `parse_rejection`, `Tailer`, the `run` task |
 | `src/aggregate.rs` | 1m / 5m / 15m / session windows: request count, token sums, mean and p95 tok/s, mean TTFT; also p50 and a per-model breakdown, which nothing renders |
 | `src/pricing.rs` | pricing table baked from `pricing.toml`; per-model `merge` of user overrides; `hypothetical_cost` |
-| `src/db.rs` | SQLite schema, sessions, the writer task (`spawn_writer`, `DbHandle`), `lifetime_totals` |
+| `src/db.rs` | SQLite schema and its v1 → v2 migration, sessions, the writer task (`spawn_writer`, `DbHandle`), `lifetime_totals` |
 | `src/config.rs` | optional config file; default db, config and log paths via `directories` |
 | `src/hardware.rs` | `sysinfo` sampler; `prime_sudo` and `spawn_powermetrics`; powermetrics line parsers |
 | `src/tui/mod.rs` | `AppState`, event loop, key handling, terminal setup and panic-safe restore |
@@ -96,6 +100,33 @@ This keeps one orphan input from mis-pairing every later output. `record_builder
 
 Only `started_at` depends on the pairing; token counts and timings come from the output event itself. With several requests in flight on one model, first-in-first-out order can give a request another one's start time.
 
+## Second source: the server log
+
+A request whose prompt doesn't fit the model's loaded context never produces stats: LM Studio refuses it before generating, so the stream above has nothing to record. Its only trace is one line in LM Studio's server log. From the MLX engine, verbatim:
+
+```
+[2026-10-08 15:37:38][ERROR][qwen/qwen3.8-27b] Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.. Error Data: n/a, Additional Data: n/a
+```
+
+`server_log::parse_rejection` takes a line only if it starts with `[YYYY-MM-DD HH:MM:SS][ERROR][<tag>] `. The log also holds every request body as pretty-printed, multi-line JSON, and a body can quote this very message; LM Studio also logs a DEBUG `[transformers]` line with the same numbers in the same second. The message after the tag must be one of the engines' overflow errors:
+
+- MLX: `Input does not fit in context length…`, with the input and context sizes. This is the only one seen in a real log.
+- llama.cpp: `request (N tokens) exceeds the available context size (M tokens)…`, from the engine's message template.
+- Both: `The number of tokens to keep from the initial prompt is greater than the context length…`, without sizes.
+
+A size counts only if ` tokens` follows it, so a line cut off mid-number gives no size rather than a wrong one. The timestamp is local time, to the second; `earliest()` resolves a DST overlap, and a time that doesn't exist (the spring-forward gap) falls back to now.
+
+The files are `<server-logs>/YYYY-MM/YYYY-MM-DD.N.log` (default `~/.lmstudio/server-logs`, `--server-log-dir` to change). LM Studio starts each day at `.1`, moves to the next number at about 10 MiB, and appends to the current file across restarts. N has passed 9, so files sort by date, then N as a number. `Tailer::poll`, called every second by `server_log::run`:
+
+1. lists the files, in month folders from the current file's month on;
+2. on the first successful listing, starts at the end of the newest file, skipping the rest of a line it lands in the middle of; with no files yet, every file that appears later is read from its start;
+3. drains the current file, then, while a later file is listed, finishes the current one and drains that next one from offset 0. The listing comes before the drain, so a file is only left once all of it has been read;
+4. reopens the file by path each time and compares its device and inode with the last read's: a replaced file, or one shorter than the offset, is read again from 0. If the current file disappears, it moves to the next file, or the newest.
+
+Lines are matched on their first 4 KiB, so a multi-megabyte body line is never held in memory; a partial last line waits for the next poll. Rejections stamped more than 60 s before the tailer started are dropped, so a file read again from 0 doesn't bring back history. The read is synchronous, inside its task, like `hardware::run_sampler`'s; at idle the log grows by under 1 KB/s. Line text never reaches `tracing`: only file names, offsets and the rejections themselves.
+
+Rejections reach the UI loop over their own channel, are saved by the writer task, and go into the feed (subject to pause, like records), but not into the aggregator: nothing ran.
+
 ## Aggregator
 
 The session's records live in a `Vec<InferenceRecord>`, cleared by `r`. A snapshot is recomputed on every redraw:
@@ -108,20 +139,23 @@ Cross-session totals come from `db::lifetime_totals`, which the lifetime poller 
 
 ## Persistence
 
-SQLite via `rusqlite` (bundled). The schema is applied with `CREATE … IF NOT EXISTS` on every open:
+SQLite via `rusqlite` (bundled). On every open, `open_or_create` applies the v1 schema (`SCHEMA_SQL`, `CREATE … IF NOT EXISTS`, frozen), then `migrate` brings the file to v2:
 
 | table | columns | notes |
 |---|---|---|
 | `sessions` | `id`, `started_at`, `ended_at` | one row per run; `ended_at` stays NULL if the run didn't shut down cleanly |
-| `inference_records` | `id`, `session_id`, `started_at`, `model_id`, `prompt_tokens`, `gen_tokens`, `ttft_ms`, `gen_ms`, `total_ms`, `tokens_per_second`, `raw_json` | indexed on `session_id` and `started_at` |
-| `schema_version` | `version` | holds 1; there are no migrations yet |
+| `inference_records` | `id`, `session_id`, `started_at`, `model_id`, `prompt_tokens`, `gen_tokens`, `ttft_ms`, `gen_ms`, `total_ms`, `tokens_per_second`, `raw_json`, `stop_reason` | indexed on `session_id` and `started_at`; `stop_reason` added in v2 |
+| `context_rejections` | `id`, `session_id`, `occurred_at`, `model_id`, `input_tokens`, `context_length` | v2; indexed on `occurred_at`; the two sizes are NULL when the message doesn't give them |
+| `schema_version` | `version` | one row per applied version: 1 and 2 |
 
-Timestamps are RFC 3339 strings in UTC. `gen_ms` is derived as described above. `total_ms` is LM Studio's `totalTimeSec` as reported; in the captured fixture it's less than TTFT plus generation time, so don't read it as wall time. `raw_json` is always NULL, and the stop reason and GPU layer count aren't stored.
+Timestamps are RFC 3339 strings in UTC. `gen_ms` is derived as described above. `total_ms` is LM Studio's `totalTimeSec` as reported; in the captured fixture it's less than TTFT plus generation time, so don't read it as wall time. `raw_json` is always NULL, and the GPU layer count isn't stored.
+
+The migration runs only while `MAX(version)` is below 2, in one `IMMEDIATE` transaction that checks the version again once it holds the lock. It adds `stop_reason` (unless `pragma_table_info` already lists it), creates `context_rejections` and records version 2. A monitor built before v2 may be writing to the same file; taking the write lock up front makes SQLite wait out the busy timeout, where a deferred transaction that read first would fail its lock upgrade at once. That older monitor keeps working on a v2 file: its schema SQL is all no-ops there, and its insert names its columns, leaving `stop_reason` NULL. So a NULL `stop_reason` means the row predates v2 or came from an older binary.
 
 Connections:
 
-- `main` opens one, inserts the session row, and hands it to `db::spawn_writer`. From then on every insert goes through that task; `DbHandle` is a cloneable sender for its channel.
-- The lifetime poller opens its own connection with the same `open_or_create`, so it re-applies the idempotent schema on open and afterwards only reads.
+- `main` opens one, which runs the migration, inserts the session row, and hands it to `db::spawn_writer`. From then on every insert, record or rejection, goes through that task; `DbHandle` is a cloneable sender for its channel.
+- The lifetime poller opens its own connection with the same `open_or_create` after that, so it finds v2 already in place and afterwards only reads.
 - The journal mode is SQLite's default rollback journal, not WAL. rusqlite's default 5 s busy timeout covers the brief overlap between the writer and the poller.
 
 ## Pricing
@@ -167,18 +201,18 @@ If any step fails, a warning goes to the log and GPU/ANE show `n/a`; the TUI sti
 | header | 3 | name · server status and URL · `err:` text when unreachable · `[PAUSED]` · lifetime reqs / sessions / prompt tok / gen tok · local clock |
 | loaded models | 6 | id · type · compat · quant · max ctx · state, with `▸` on the most recent request's model. Lists every downloaded model, but only 3 rows fit |
 | hardware | 3 | one line: system CPU/MEM │ LM Studio CPU/RSS/process count │ GPU/ANE |
-| live feed | `Min(7)` | last 30 records, newest first; shows terminal height − 32 of them, no scrolling |
+| live feed | `Min(7)` | last 30 entries, newest first in arrival order: completed requests (by start time) and refusals (by refusal time). Red marks context overflow: a `contextLengthReached` stop cell, or a whole `rejected (ctx N)` row with the refused prompt's size. Shows terminal height − 32 of them, no scrolling |
 | rolling metrics | 9 | columns 1m / 5m / 15m / session; rows: requests, prompt tok, gen tok, mean tok/s, p95 tok/s, mean TTFT |
 | hypothetical cost | 7 | per frontier model: session input / output / total USD |
 | footer | 1 | `q quit · r reset session · p pause` |
 
 The fixed panels take 29 rows and the feed at least 7, so 36 rows is the minimum (`hardware_row_survives_at_minimum_height` renders 120×36). Every panel fits in 120 columns except the header, which needs about 145 even with zero totals; its clock is the first thing cut off.
 
-[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor), the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together.
+[Ollama-Monitor](https://github.com/Ward-Software-Defined-Systems/Ollama-Monitor), the sibling project for Ollama, ports this TUI panel for panel: its `tui/layout.rs` is a byte-identical copy and its `tui/widgets.rs` differs only in data mapping plus a few Ollama-only extras. Change both together. The exception for now is the overflow rows (`FeedEntry::Rejected`, the red stop cell), which have no Ollama data source yet; `rejected_row` and `stop_cell` are written to port as they are.
 
 The loop draws, then waits in `tokio::select!` for the first of: the 250 ms tick, a key, or a message on any channel. Channel arms match `Some(x) = rx.recv()`, so a closed channel disables its arm instead of spinning the loop. Keys come from a plain thread blocked in `crossterm::event::read`, which forwards key presses over a channel.
 
-Pause (`p`) only gates `AppState::ingest_record`. The loop still writes each record to the database, but while paused the record skips the feed and the aggregator for good. The header, models, hardware and lifetime totals keep updating, and the rolling windows keep sliding.
+Pause (`p`) only gates `AppState::ingest_record` and `ingest_rejection`. The loop still writes each record and rejection to the database, but while paused they skip the feed (and records the aggregator) for good. The header, models, hardware and lifetime totals keep updating, and the rolling windows keep sliding.
 
 Terminal handling:
 
@@ -190,7 +224,7 @@ Terminal handling:
 
 ## Notable invariants
 
-- Every record the parser emits is written to the database exactly once, by the UI loop: `tui::run` through its `record_sink`, or `run_headless`. While not paused, the TUI also adds it to the feed and the aggregator.
+- Every record the parser emits, and every rejection the tailer emits, is written to the database exactly once, by the UI loop: `tui::run` through its `record_sink`, or `run_headless`. While not paused, the TUI also adds it to the feed, and a record to the aggregator.
 - Pricing keys are hyphenated (`gemini-3-1-pro`, not `gemini-3.1-pro`) so they work as bare TOML keys. A key that's in `FRONTIER_MODELS` but missing from the table shows as `(no rate)`.
 - `tracing` writes only to the log file. stderr is used only before the TUI starts (the line explaining sudo, `sudo -v failed` if priming fails, sudo's own prompt on the terminal, and `powermetrics unavailable` if sudo can't be spawned) and in `--no-tui` mode (a banner and one line per request).
 - `lms log stream` restarts with backoff 1 → 2 → 4 → 8 → 16 → 30 s, which never resets (see Known gaps).
@@ -205,13 +239,14 @@ Terminal handling:
 |---|---|
 | `parser` | line classification and pairing against the captured stream, orphan skipping, eviction, a 5-minute request, unmatched outputs |
 | `aggregate` | windows, percentiles and per-model sums on synthetic records |
-| `db` | schema idempotence, lifetime totals across sessions, the writer task |
+| `server_log` | rejection parsing against verbatim server-log lines, including real ones that must not match; the tailer in temp folders: starting at the end, partial and overlong lines, rotation across numbers, days and months, truncation, replacement and deletion, the stale-line guard, the `run` task |
+| `db` | the v1 → v2 migration (fresh, idempotent, beside an open v1 connection, concurrent opens), stop reasons, rejections, lifetime totals across sessions, the writer task |
 | `pricing`, `config` | baked rates, cost arithmetic, per-model override merging |
 | `api` | `/api/v0/models` parsing against captured responses |
 | `hardware` | powermetrics line parsers, readings clearing when powermetrics exits, byte formatting, a live `sysinfo` sample |
-| `tui` | rendering into ratatui's `TestBackend`: every panel at 120×36, the one-line hardware row, a partial pricing override |
+| `tui` | rendering into ratatui's `TestBackend`: every panel at 120×36, the one-line hardware row, a partial pricing override, red overflow cells and rows, feed order, rejections under pause |
 
-The fixtures are real LM Studio captures. The `api` and `parser` tests load them; `lms-log-source-runtime-mlx.txt` is kept only as evidence for the event-source pivot.
+The fixtures are real LM Studio captures. The `api` and `parser` tests load them; `lms-log-source-runtime-mlx.txt` is kept only as evidence for the event-source pivot. The `server_log` tests use verbatim server-log lines inline instead of a captured file, because a raw server log holds private request bodies.
 
 CI builds with `rust:1.97`, so the declared minimum, Rust 1.94, isn't exercised. The `log_stream` tilde test sets `HOME` for the whole test process; don't add tests that read it.
 
@@ -227,10 +262,14 @@ CI builds with `rust:1.97`, so the declared minimum, Rust 1.94, isn't exercised.
 - p50, the per-model breakdown and `raw_json` exist but nothing uses them.
 - Pricing ignores long-context tiers and caching.
 - If `Terminal::new` fails after raw mode is on, `tui::run` returns without restoring the terminal.
+- Refusals are recognized from the MLX engine's message, the only one seen in a real log. The llama.cpp messages are matched from the engine's templates, unverified; if llama.cpp errors are logged as multi-line JSON rather than one line, they're missed.
+- Nothing in the UI shows whether the server-log folder was found; the log says `server log folder …` when it can't be read. Refusals appear up to a second late, stamped to the second in local time.
+- `stop_reason` is NULL on rows recorded before v2 or by an older binary sharing the database.
+- The 2 s `/api/v0/models` poll is most of what LM Studio writes to its server log, since it logs every request and the full JSON response: about 48 MiB a day while the monitor runs.
 
 ## Reference files
 
 - [`README.md`](./README.md): usage, install, troubleshooting
 - [`pricing.toml`](./pricing.toml): baked-in frontier rates
-- [`fixtures/`](./fixtures): captured `/api/v0/models` responses and `lms log stream` output
+- [`fixtures/`](./fixtures): captured `/api/v0/models` responses and `lms log stream` output (the server-log lines live inline in `src/server_log.rs`'s tests)
 - [`.gitlab-ci.yml`](./.gitlab-ci.yml): the fmt, clippy and test jobs

@@ -6,6 +6,7 @@ mod hardware;
 mod log_stream;
 mod parser;
 mod pricing;
+mod server_log;
 mod tui;
 
 use std::path::PathBuf;
@@ -32,13 +33,22 @@ struct Cli {
     #[arg(long)]
     db: Option<PathBuf>,
 
-    /// Run without TUI; print one summary line per completed inference to stderr.
+    /// Run without TUI; print one summary line per completed or refused request to stderr.
     #[arg(long)]
     no_tui: bool,
 
     /// Path to the `lms` CLI binary.
     #[arg(long, env = "LMS_BIN", default_value = "~/.lmstudio/bin/lms")]
     lms_bin: String,
+
+    /// LM Studio's server log folder, read for requests refused because the prompt didn't
+    /// fit the model's loaded context.
+    #[arg(
+        long,
+        env = "LMS_SERVER_LOG_DIR",
+        default_value = "~/.lmstudio/server-logs"
+    )]
+    server_log_dir: String,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -53,13 +63,15 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("could not resolve default db path"))?;
     let log_path = config::default_log_path()
         .ok_or_else(|| anyhow::anyhow!("could not resolve default log path"))?;
+    let server_log_dir = PathBuf::from(log_stream::expand_tilde(&cli.server_log_dir));
 
     init_tracing(&log_path)?;
     tracing::info!(
-        "starting lmstudio-monitor base_url={} db={} log={}",
+        "starting lmstudio-monitor base_url={} db={} log={} server_logs={}",
         cli.base_url,
         db_path.display(),
-        log_path.display()
+        log_path.display(),
+        server_log_dir.display()
     );
 
     let cfg = config::Config::load(config_path.as_deref())?;
@@ -84,6 +96,7 @@ async fn main() -> Result<()> {
     let (models_tx, models_rx) = mpsc::channel(8);
     let (line_tx, line_rx) = mpsc::channel::<String>(256);
     let (records_tx, records_rx) = mpsc::channel::<parser::InferenceRecord>(64);
+    let (rejections_tx, rejections_rx) = mpsc::channel::<server_log::ContextRejection>(16);
     let (lifetime_tx, lifetime_rx) = mpsc::channel::<db::LifetimeTotals>(4);
     let (hardware_tx, hardware_rx) = mpsc::channel::<hardware::HardwareSnapshot>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -125,6 +138,13 @@ async fn main() -> Result<()> {
         let sd = shutdown_rx.clone();
         async move {
             hardware::run_sampler(hardware_tx, Duration::from_secs(2), sd, pm_state).await;
+        }
+    });
+
+    tokio::spawn({
+        let sd = shutdown_rx.clone();
+        async move {
+            server_log::run(server_log_dir, Duration::from_secs(1), rejections_tx, sd).await;
         }
     });
 
@@ -179,13 +199,20 @@ async fn main() -> Result<()> {
         // headless ignores the lifetime + hardware channels; drop receivers so poller sends fail fast.
         drop(lifetime_rx);
         drop(hardware_rx);
-        run_headless(records_rx, db_handle.clone(), shutdown_rx.clone()).await
+        run_headless(
+            records_rx,
+            rejections_rx,
+            db_handle.clone(),
+            shutdown_rx.clone(),
+        )
+        .await
     } else {
         tui::run(
             cli.base_url.clone(),
             pricing,
             models_rx,
             records_rx,
+            rejections_rx,
             lifetime_rx,
             hardware_rx,
             shutdown_rx.clone(),
@@ -208,10 +235,13 @@ async fn main() -> Result<()> {
 
 async fn run_headless(
     mut record_rx: mpsc::Receiver<parser::InferenceRecord>,
+    mut rejection_rx: mpsc::Receiver<server_log::ContextRejection>,
     db: db::DbHandle,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    eprintln!("lmstudio-monitor: headless mode (one line per completed inference; Ctrl-C to quit)");
+    eprintln!(
+        "lmstudio-monitor: headless mode (one line per completed or refused request; Ctrl-C to quit)"
+    );
     loop {
         tokio::select! {
             rec = record_rx.recv() => {
@@ -227,6 +257,19 @@ async fn run_headless(
                     r.stop_reason.as_deref().unwrap_or("-"),
                 );
                 db.insert(r).await;
+            }
+            // `Some(..)`, unlike the records arm: if the server-log task ends, headless
+            // mode keeps going.
+            Some(rej) = rejection_rx.recv() => {
+                let count = |n: Option<u64>| n.map_or("?".to_string(), |n| n.to_string());
+                eprintln!(
+                    "{} model={} REJECTED input={} ctx={}",
+                    rej.at.with_timezone(&chrono::Local).format("%H:%M:%S"),
+                    rej.model_id,
+                    count(rej.input_tokens),
+                    count(rej.context_length),
+                );
+                db.insert_rejection(rej).await;
             }
             _ = shutdown.changed() => return Ok(()),
         }

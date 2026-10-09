@@ -1,15 +1,19 @@
+use std::collections::VecDeque;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+use super::FEED_CAPACITY;
 use crate::aggregate::{AggregateSnapshot, WindowMetrics};
 use crate::api::ModelInfo;
 use crate::db::LifetimeTotals;
 use crate::hardware::{HardwareSnapshot, format_bytes, format_bytes_ratio};
 use crate::parser::InferenceRecord;
 use crate::pricing::{FRONTIER_MODELS, PricingTable, hypothetical_cost};
+use crate::server_log::ContextRejection;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ServerStatus {
@@ -153,7 +157,16 @@ pub fn render_models(
     f.render_widget(table, area);
 }
 
-pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
+/// A live-feed row: a request that ran, or one LM Studio refused because its prompt
+/// didn't fit the model's loaded context.
+#[derive(Debug, Clone)]
+pub enum FeedEntry {
+    Completed(InferenceRecord),
+    Rejected(ContextRejection),
+}
+
+/// `feed` is newest-first already.
+pub fn render_feed(f: &mut Frame, area: Rect, feed: &VecDeque<FeedEntry>) {
     let header = Row::new(vec![
         Cell::from("time"),
         Cell::from("model"),
@@ -169,24 +182,11 @@ pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = recent
+    let rows: Vec<Row> = feed
         .iter()
-        .rev() // newest first
-        .map(|r| {
-            let time = r
-                .started_at
-                .with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string();
-            Row::new(vec![
-                Cell::from(time),
-                Cell::from(truncate(&r.model_id, 28).to_string()),
-                Cell::from(r.prompt_tokens.to_string()),
-                Cell::from(r.gen_tokens.to_string()),
-                Cell::from(format!("{:.0}ms", r.ttft_ms)),
-                Cell::from(format!("{:.1}", r.tokens_per_second)),
-                Cell::from(r.stop_reason.as_deref().unwrap_or("-").to_string()),
-            ])
+        .map(|entry| match entry {
+            FeedEntry::Completed(r) => completed_row(r),
+            FeedEntry::Rejected(r) => rejected_row(r),
         })
         .collect();
 
@@ -197,13 +197,67 @@ pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(8),
-        Constraint::Length(24),
+        // Fits LM Studio's longest stop reason, `maxPredictedTokensReached`.
+        Constraint::Length(25),
     ];
-    let title = format!("live request feed ({}/30)", recent.len());
+    let title = format!("live request feed ({}/{FEED_CAPACITY})", feed.len());
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(table, area);
+}
+
+/// LM Studio's stop reason when generation runs into the loaded context's limit.
+const CONTEXT_FULL_STOP: &str = "contextLengthReached";
+
+/// Feed rows and cells that show context overflow use this colour.
+const OVERFLOW: Color = Color::Red;
+
+fn completed_row(r: &InferenceRecord) -> Row<'static> {
+    let stop = r.stop_reason.as_deref().unwrap_or("-");
+    Row::new(vec![
+        Cell::from(local_hms(&r.started_at)),
+        Cell::from(truncate(&r.model_id, 28).to_string()),
+        Cell::from(r.prompt_tokens.to_string()),
+        Cell::from(r.gen_tokens.to_string()),
+        Cell::from(format!("{:.0}ms", r.ttft_ms)),
+        Cell::from(format!("{:.1}", r.tokens_per_second)),
+        stop_cell(stop, stop == CONTEXT_FULL_STOP),
+    ])
+}
+
+/// Nothing ran, so there's no generation, TTFT or speed; the prompt cell holds the size
+/// that didn't fit and the stop cell the context it was measured against.
+fn rejected_row(r: &ContextRejection) -> Row<'static> {
+    let stop = match r.context_length {
+        Some(ctx) => format!("rejected (ctx {ctx})"),
+        None => "rejected (ctx)".to_string(),
+    };
+    Row::new(vec![
+        Cell::from(local_hms(&r.at)),
+        Cell::from(truncate(&r.model_id, 28).to_string()),
+        Cell::from(r.input_tokens.map_or("?".to_string(), |n| n.to_string())),
+        Cell::from("-"),
+        Cell::from("-"),
+        Cell::from("-"),
+        stop_cell(&stop, true),
+    ])
+    .style(Style::default().fg(OVERFLOW))
+}
+
+fn stop_cell(text: &str, overflow: bool) -> Cell<'static> {
+    let cell = Cell::from(text.to_string());
+    if overflow {
+        cell.style(Style::default().fg(OVERFLOW))
+    } else {
+        cell
+    }
+}
+
+fn local_hms(t: &chrono::DateTime<chrono::Utc>) -> String {
+    t.with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 pub fn render_rolling(f: &mut Frame, area: Rect, snap: &AggregateSnapshot) {

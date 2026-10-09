@@ -8,20 +8,22 @@ It's passive: it reads LM Studio's own stats stream and never sits in the reques
 
 ## Features
 
-- **Live request feed**: the last 30 completed requests, newest first, with start time, model, prompt and generated tokens, time to first token, tokens per second and stop reason. It shows as many as fit (4 rows in a 36-row terminal, 8 in a 40-row one) and doesn't scroll.
+- **Live request feed**: the last 30 requests, newest first, with start time, model, prompt and generated tokens, time to first token, tokens per second and stop reason. Context overflow shows in red: the stop reason `contextLengthReached` when generation ran into the context limit, and a whole `rejected (ctx N)` row when LM Studio refused a request because its prompt didn't fit the loaded context. The feed shows as many rows as fit (4 in a 36-row terminal, 8 in a 40-row one) and doesn't scroll.
 - **Models**: your downloaded models, loaded or not, with type, format, quantization, maximum context length and load state; `▸` marks the model the last request went to. The panel has room for three, so extra models are cut off.
 - **Rolling metrics**: requests, prompt and generated tokens, mean and p95 tokens per second, and mean time to first token over the last 1, 5 and 15 minutes and the whole session.
 - **Hypothetical cost**: the session's prompt and generated tokens priced at list rates for Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8 and Gemini 3.1 Pro.
 - **Hardware**: system CPU and memory; CPU, memory and process count summed over LM Studio's processes (the app, its helpers, the inference worker and the `lms` CLI); GPU active residency and Neural Engine power. LM Studio's CPU is per core, so it can pass 100%.
-- **History**: lifetime request, session and token totals, kept in a local SQLite database. Each run of the monitor is one session.
+- **History**: lifetime request, session and token totals, kept in a local SQLite database along with each request's stop reason and every refused request. Each run of the monitor is one session.
 
 ## How it works
 
 LM Studio publishes per-request events on its log stream. LMS-Monitor runs `lms log stream -s model --stats --json` as a subprocess and reads it line by line: each request produces one event when it starts and another, carrying its stats, when it finishes, and the monitor pairs the two. It also polls the server's `/api/v0/models` endpoint every 2 seconds for the model list. Hardware figures come from [`sysinfo`](https://crates.io/crates/sysinfo) and from macOS's `powermetrics`, which needs sudo.
 
+A request whose prompt doesn't fit the model's loaded context never reaches that stream: LM Studio refuses it before anything runs. Its only trace is an error line in LM Studio's server log, so the monitor also follows the newest file under `~/.lmstudio/server-logs` and picks those lines out.
+
 Only requests made while the monitor is running are counted; it doesn't read LM Studio's history.
 
-**Privacy:** the stream carries each request's full prompt and response text. The monitor discards it as it parses each line and never logs or stores it; the database holds only per-request metadata (model, token counts, timings). Nothing leaves your machine: the only network traffic is to the LM Studio server, and the cost figures come from a pricing table compiled into the binary.
+**Privacy:** the stream carries each request's full prompt and response text, and the server log holds full request bodies. The monitor discards that text as it reads each line and never logs or stores it; the database holds only per-request metadata (model, token counts, timings, stop reason). Nothing leaves your machine: the only network traffic is to the LM Studio server, and the cost figures come from a pricing table compiled into the binary.
 
 ## Requirements
 
@@ -58,6 +60,7 @@ Before the dashboard opens, it runs `sudo -v`, which asks for your password unle
 |---|---|---|
 | `--base-url <URL>` | `http://localhost:1234` (env `LMS_BASE_URL`) | LM Studio server |
 | `--lms-bin <PATH>` | `~/.lmstudio/bin/lms` (env `LMS_BIN`) | the `lms` CLI |
+| `--server-log-dir <DIR>` | `~/.lmstudio/server-logs` (env `LMS_SERVER_LOG_DIR`) | LM Studio's server log, for refused requests |
 | `--config <PATH>` | `~/Library/Application Support/lmstudio-monitor/config.toml` | optional config file |
 | `--db <PATH>` | `~/Library/Application Support/lmstudio-monitor/usage.db` | SQLite database |
 | `--no-tui` | off | headless mode |
@@ -68,7 +71,7 @@ Before the dashboard opens, it runs `sudo -v`, which asks for your password unle
 |---|---|
 | `q` or `Ctrl-C` | quit |
 | `r` | reset the session: clears the feed, rolling metrics and cost panel (the database and lifetime totals keep everything) |
-| `p` | pause or resume. Requests that finish while paused are saved to the database and counted in the lifetime totals, but they never reach the feed, rolling metrics or cost panel, even after you resume. Everything else keeps updating. |
+| `p` | pause or resume. Requests that finish while paused are saved to the database and counted in the lifetime totals, but they never reach the feed, rolling metrics or cost panel, even after you resume. Requests refused while paused are saved too, and never reach the feed. Everything else keeps updating. |
 
 ## Capture accuracy
 
@@ -78,6 +81,8 @@ Token counts, time to first token and tokens per second are LM Studio's own figu
 - **Windows.** The 1, 5 and 15 minute windows count requests by start time, so a request that ran longer than a minute never shows in the 1m column.
 
 A request shows up only once it finishes. Requests that finish while the `lms` stream is restarting, or whose stats event is missing a field the monitor needs, aren't recorded.
+
+A refused request shows up within about a second, at the time LM Studio logged the refusal (to the second), so a refused row's time is when it was refused while a completed row's is when it started. Refused requests don't count in the rolling metrics, cost panel or lifetime totals, since nothing ran. They're recognized by the MLX engine's error, `Input does not fit in context length`; the llama.cpp engine's wording is matched from its message templates but hasn't been seen in a real log yet.
 
 ## Configuration
 
@@ -109,6 +114,7 @@ The log isn't rotated. `LMS_LOG` sets its filter: `LMS_LOG=debug` adds detail, a
 |---|---|
 | header shows `server: ● unreachable` | Is the LM Studio server running (`~/.lmstudio/bin/lms server status`)? Is `--base-url` pointing at its port? The `err:` text after the status says what failed. The models panel keeps showing the last list it got. |
 | no requests appear | Does the header show `[PAUSED]`? Requests appear only when they finish. `~/.lmstudio/bin/lms log stream -s model --stats --json` should print a JSON line when a request starts and another when it finishes; if it doesn't, update LM Studio. If `lms` lives elsewhere, pass `--lms-bin`; when it can't be started, the log shows `lms log stream error`. |
+| refused requests never appear | Is `--server-log-dir` pointing at LM Studio's server log folder, the one with `YYYY-MM` subfolders? If the monitor can't read it, the log says `server log folder … context-overflow rejections won't show`. When the monitor sees a refusal, the log says `context overflow:`. |
 | "Permission denied" on the log or database at startup | An earlier run under `sudo` left root-owned files: `sudo chown -R "$USER":staff ~/Library/Application\ Support/lmstudio-monitor`. |
 | GPU or ANE shows `n/a` | Check that `sudo powermetrics --samplers cpu_power,gpu_power,ane_power -n 1` prints `GPU HW active residency` and `ANE Power` lines. Then run with `LMS_LOG=info,lmstudio_monitor::powermetrics=trace` and search the log for `powermetrics`. If they switch to `n/a` mid-run, powermetrics exited (the log says `powermetrics exited`); restart the monitor to bring them back. |
 
