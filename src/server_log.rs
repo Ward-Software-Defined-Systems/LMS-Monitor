@@ -73,10 +73,12 @@ fn overflow_numbers(message: &str) -> Option<(Option<u64>, Option<u64>)> {
             number_before_tokens(message, "available context size ("),
         ));
     }
-    // Both engines, when the overflow policy can't keep the start of the prompt.
+    // Any engine, when the overflow policy can't keep the start of the prompt. LM Studio's
+    // API error for it adds "(n_keep: 13055>= n_ctx: 4096)"; n_keep is the part of the
+    // prompt to keep, not the whole prompt, so only the context length is taken.
     if message.contains("tokens to keep from the initial prompt is greater than the context length")
     {
-        return Some((None, None));
+        return Some((None, number_after(message, "n_ctx: ")));
     }
     None
 }
@@ -84,13 +86,22 @@ fn overflow_numbers(message: &str) -> Option<(Option<u64>, Option<u64>)> {
 /// The number right after `label`, provided ` tokens` follows it, so that a line cut off
 /// mid-number doesn't yield a smaller one.
 fn number_before_tokens(message: &str, label: &str) -> Option<u64> {
+    let (number, rest) = digits_after(message, label)?;
+    rest.starts_with(" tokens").then(|| number.parse().ok())?
+}
+
+/// The number right after `label`, provided something other than a digit follows it, for
+/// the same reason.
+fn number_after(message: &str, label: &str) -> Option<u64> {
+    let (number, rest) = digits_after(message, label)?;
+    (!rest.is_empty()).then(|| number.parse().ok())?
+}
+
+/// The run of digits right after `label`, and what follows it.
+fn digits_after<'a>(message: &'a str, label: &str) -> Option<(&'a str, &'a str)> {
     let (_, after) = message.split_once(label)?;
     let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let (number, rest) = after.split_at(digits);
-    if number.is_empty() || !rest.starts_with(" tokens") {
-        return None;
-    }
-    number.parse().ok()
+    (digits > 0).then(|| after.split_at(digits))
 }
 
 fn parse_bytes(line: &[u8]) -> Option<ContextRejection> {
@@ -497,7 +508,8 @@ mod tests {
         assert_eq!((r.input_tokens, r.context_length), (None, None));
     }
 
-    /// Built from the engines' message templates; not yet seen in a real log.
+    /// Built from the engines' message templates and LM Studio's API error text; not yet
+    /// seen in a real server log.
     #[test]
     fn parses_other_engine_messages() {
         let r = parse_rejection_in(
@@ -515,6 +527,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!((r.input_tokens, r.context_length), (None, None));
+        // n_keep is only the part of the prompt to keep, so it isn't taken as the size.
+        let api = "[2026-10-08 15:37:38][ERROR][m] The number of tokens to keep from the initial prompt is greater than the context length (n_keep: 13055>= n_ctx: 4096). Try to load the model with a larger context length, or provide a shorter input.";
+        let r = parse_rejection_in(api, &pdt()).unwrap();
+        assert_eq!((r.input_tokens, r.context_length), (None, Some(4_096)));
+        // Cut off mid-number: no context length rather than a shorter one.
+        let cut = &api[..api.find("n_ctx: 4096").unwrap() + "n_ctx: 40".len()];
+        let r = parse_rejection_in(cut, &pdt()).unwrap();
+        assert_eq!(r.context_length, None);
     }
 
     #[test]

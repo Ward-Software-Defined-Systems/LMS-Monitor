@@ -1,6 +1,6 @@
 # Default frontier pricing baked into the binary.
 # Per-million-token USD list rates, updated 2026-10-04 (Gemini at its <=200K-token prompt rate).
-# Override per model in ~/Library/Application Support/lmstudio-monitor/config.toml,
+# Override per model in the user config file (location in README > Files),
 # or the file passed with --config; see README "Configuration".
 
 [providers.anthropic.models.claude-fable-5-1]

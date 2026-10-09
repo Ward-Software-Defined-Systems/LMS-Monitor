@@ -286,7 +286,8 @@ mod tests {
             lms_cpu_percent: 12.3,
             lms_rss_bytes: 20_100_000_000,
             lms_process_count: 3,
-            gpu_active_percent: Some(38.5),
+            gpu_util_pct: Some(38.5),
+            gpu_mem_used_bytes: Some(5_100_000_000),
             ane_power_mw: Some(234.0),
         };
         state
@@ -377,10 +378,12 @@ mod tests {
             .iter()
             .find(|l| l.contains("lms cpu"))
             .expect("hardware row rendered");
-        assert!(
-            hw_row.contains("ane  234 mW"),
-            "hardware row clipped: {hw_row}"
-        );
+        let tail = if cfg!(target_os = "macos") {
+            "ane  234 mW"
+        } else {
+            "vram 5.1 GB"
+        };
+        assert!(hw_row.contains(tail), "hardware row clipped: {hw_row}");
         assert!(lines.last().unwrap().contains("q quit"), "footer missing");
     }
 

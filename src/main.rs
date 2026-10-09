@@ -77,16 +77,12 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load(config_path.as_deref())?;
     let pricing = cfg.effective_pricing();
 
-    // Take the sudo password now, while the terminal is still in normal mode and before
-    // the database is opened, so Ctrl-C at the prompt exits without recording a session.
-    // powermetrics later runs with `sudo -n` on the cached credential.
+    // On macOS, take the sudo password now, while the terminal is still in normal mode and
+    // before the database is opened, so Ctrl-C at the prompt exits without recording a
+    // session; powermetrics later runs with `sudo -n` on the cached credential. On Linux
+    // nvidia-smi needs no privilege, so there's nothing to do.
     if !cli.no_tui {
-        eprintln!(
-            "lmstudio-monitor: sudo runs powermetrics for the GPU/ANE figures (--no-tui skips it)"
-        );
-        if !hardware::prime_sudo() {
-            eprintln!("sudo -v failed; GPU/ANE may show n/a");
-        }
+        hardware::prime();
     }
 
     let conn = db::open_or_create(&db_path)?;
@@ -118,26 +114,26 @@ async fn main() -> Result<()> {
 
     tokio::spawn(parser::parser_task(line_rx, records_tx));
 
-    // Spawned even if `prime_sudo` failed, so a NOPASSWD rule for powermetrics still
-    // works. If it can't start, GPU/ANE show n/a and the TUI runs anyway.
-    let pm_handle = if cli.no_tui {
+    // Spawned even if priming failed, so a NOPASSWD rule for powermetrics still works. If
+    // the child can't start, the GPU figures show n/a and the TUI runs anyway.
+    let telemetry = if cli.no_tui {
         None
     } else {
-        match hardware::spawn_powermetrics(shutdown_rx.clone()).await {
+        match hardware::spawn_telemetry(shutdown_rx.clone()) {
             Ok(h) => Some(h),
             Err(e) => {
-                eprintln!("powermetrics unavailable: {e:#} — GPU/ANE will show n/a");
-                tracing::warn!("powermetrics spawn failed: {e:#}");
+                eprintln!("GPU telemetry unavailable: {e:#}; the GPU figures will show n/a");
+                tracing::warn!("GPU telemetry spawn failed: {e:#}");
                 None
             }
         }
     };
-    let pm_state = pm_handle.as_ref().map(|h| h.state.clone());
+    let telemetry_state = telemetry.as_ref().map(|h| h.state.clone());
 
     tokio::spawn({
         let sd = shutdown_rx.clone();
         async move {
-            hardware::run_sampler(hardware_tx, Duration::from_secs(2), sd, pm_state).await;
+            hardware::run_sampler(hardware_tx, Duration::from_secs(2), sd, telemetry_state).await;
         }
     });
 
@@ -223,7 +219,7 @@ async fn main() -> Result<()> {
 
     let _ = shutdown_tx.send(true);
     db_handle.shutdown().await;
-    if let Some(h) = pm_handle {
+    if let Some(h) = telemetry {
         h.terminate().await;
     }
     // Brief drain so the writer task can flush.
