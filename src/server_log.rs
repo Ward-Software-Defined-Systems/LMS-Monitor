@@ -65,8 +65,9 @@ fn overflow_numbers(message: &str) -> Option<(Option<u64>, Option<u64>)> {
             number_before_tokens(message, "only supports "),
         ));
     }
-    // llama.cpp engine, from its message template: "request (5000 tokens) exceeds the
-    // available context size (4096 tokens), try increasing it".
+    // llama.cpp engine, as seen in a real log on Linux: LM Studio logs the engine's JSON
+    // error, whose message is "request (94920 tokens) exceeds the available context size
+    // (8192 tokens), try increasing it".
     if message.contains("exceeds the available context size") {
         return Some((
             number_before_tokens(message, "request ("),
@@ -448,6 +449,13 @@ mod tests {
         "[2026-10-08 15:37:38][ERROR][qwen/qwen3.8-27b] Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.. Error Data: n/a, Additional Data: n/a",
     ];
 
+    /// Verbatim from LM Studio's server log on Linux (llama.cpp engine), which logs the
+    /// engine's JSON error on the same line.
+    const REAL_LLAMA_CPP_REJECTIONS: [&str; 2] = [
+        r#"[2026-10-10 07:36:20][ERROR][google/gemma-4-12b] Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (94920 tokens) exceeds the available context size (8192 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":94920,"n_ctx":8192}}. Error Data: n/a, Additional Data: n/a"#,
+        r#"[2026-10-10 07:48:56][ERROR][google/gemma-4-12b] Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (94920 tokens) exceeds the available context size (28672 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":94920,"n_ctx":28672}}. Error Data: n/a, Additional Data: n/a"#,
+    ];
+
     /// Verbatim; the monitor's own model polling fills most of the log with these.
     const POLL_LINE: &str = "[2026-10-08 15:37:39][DEBUG] Received request: GET to /api/v0/models";
 
@@ -473,6 +481,29 @@ mod tests {
         assert_eq!(
             parsed[3].at,
             Utc.with_ymd_and_hms(2026, 10, 8, 22, 37, 38).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_real_llama_cpp_rejections() {
+        let parsed: Vec<ContextRejection> = REAL_LLAMA_CPP_REJECTIONS
+            .iter()
+            .map(|line| parse_rejection_in(line, &pdt()).expect(line))
+            .collect();
+        let numbers: Vec<(Option<u64>, Option<u64>)> = parsed
+            .iter()
+            .map(|r| (r.input_tokens, r.context_length))
+            .collect();
+        assert_eq!(
+            numbers,
+            [(Some(94_920), Some(8_192)), (Some(94_920), Some(28_672))]
+        );
+        for r in &parsed {
+            assert_eq!(r.model_id, "google/gemma-4-12b");
+        }
+        assert_eq!(
+            parsed[1].at,
+            Utc.with_ymd_and_hms(2026, 10, 10, 14, 48, 56).unwrap()
         );
     }
 
@@ -508,8 +539,9 @@ mod tests {
         assert_eq!((r.input_tokens, r.context_length), (None, None));
     }
 
-    /// Built from the engines' message templates and LM Studio's API error text; not yet
-    /// seen in a real server log.
+    /// Not seen in a real server log: llama.cpp's message on its own, as its template has
+    /// it (LM Studio on Linux wraps it in JSON, as above), and the n_keep check, built from
+    /// LM Studio's API error text.
     #[test]
     fn parses_other_engine_messages() {
         let r = parse_rejection_in(

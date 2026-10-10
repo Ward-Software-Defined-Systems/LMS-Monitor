@@ -112,9 +112,9 @@ A request whose prompt doesn't fit the model's loaded context never produces sta
 
 `server_log::parse_rejection` takes a line only if it starts with `[YYYY-MM-DD HH:MM:SS][ERROR][<tag>] `. The log also holds every request body as pretty-printed, multi-line JSON, and a body can quote this very message; LM Studio also logs a DEBUG `[transformers]` line with the same numbers in the same second. The message after the tag must be one of the engines' overflow errors:
 
-- MLX: `Input does not fit in context length…`, with the input and context sizes. This is the only one seen in a real log.
-- llama.cpp: `request (N tokens) exceeds the available context size (M tokens)…`, from the engine's message template.
-- Both: `The number of tokens to keep from the initial prompt is greater than the context length…`. When LM Studio's version of it adds `(n_keep: N>= n_ctx: M)`, the context length comes from `n_ctx`; `n_keep` is only the part of the prompt to keep, so no prompt size.
+- MLX: `Input does not fit in context length…`, with the input and context sizes. Seen in real logs on macOS.
+- llama.cpp: `request (N tokens) exceeds the available context size (M tokens)…`. Seen in a real log on Linux, where the line carries the engine's JSON error: `Engine protocol predict request returned 400: {"error":{"code":400,"message":"request (94920 tokens) exceeds the available context size (8192 tokens), try increasing it",…}}`.
+- Both: `The number of tokens to keep from the initial prompt is greater than the context length…`. When LM Studio's version of it adds `(n_keep: N>= n_ctx: M)`, the context length comes from `n_ctx`; `n_keep` is only the part of the prompt to keep, so no prompt size. Not yet seen in a real log.
 
 A size counts only if ` tokens` follows it, so a line cut off mid-number gives no size rather than a wrong one. The timestamp is local time, to the second; `earliest()` resolves a DST overlap, and a time that doesn't exist (the spring-forward gap) falls back to now.
 
@@ -249,7 +249,7 @@ Terminal handling:
 |---|---|
 | `parser` | line classification and pairing against the captured stream, orphan skipping, eviction, a 5-minute request, unmatched outputs |
 | `aggregate` | windows, percentiles and per-model sums on synthetic records |
-| `server_log` | rejection parsing against verbatim server-log lines, including real ones that must not match; the tailer in temp folders: starting at the end, partial and overlong lines, rotation across numbers, days and months, truncation, replacement and deletion, the stale-line guard, the `run` task |
+| `server_log` | rejection parsing against verbatim server-log lines: real MLX refusals from macOS, real llama.cpp refusals from Linux, and real lines that must not match; the tailer in temp folders: starting at the end, partial and overlong lines, rotation across numbers, days and months, truncation, replacement and deletion, the stale-line guard, the `run` task |
 | `db` | the v1 → v2 migration (fresh, idempotent, beside an open v1 connection, concurrent opens), stop reasons, rejections, lifetime totals across sessions, the writer task |
 | `pricing`, `config` | baked rates, cost arithmetic, per-model override merging |
 | `api` | `/api/v0/models` parsing against captured responses |
@@ -273,7 +273,7 @@ CI builds with `rust:1.97`, so the declared minimum, Rust 1.94, isn't exercised.
 - p50, the per-model breakdown and `raw_json` exist but nothing uses them.
 - Pricing ignores long-context tiers and caching.
 - If `Terminal::new` fails after raw mode is on, `tui::run` returns without restoring the terminal.
-- Refusals are recognized from the MLX engine's message, the only one seen in a real log. The llama.cpp messages, and LM Studio's "tokens to keep … (n_keep: N>= n_ctx: M)" check, are matched from engine templates and API error text, unverified in a server log; if they're logged as multi-line JSON rather than one line, they're missed. On Linux only llama.cpp engines run, so this matters most there. LM Studio 0.3.x logged refusals without the model tag (`[ERROR] Trying to keep the first N tokens…`); those aren't matched.
+- The MLX and llama.cpp refusal messages are both verified in real logs (MLX on macOS, llama.cpp on Linux). LM Studio's "tokens to keep … (n_keep: N>= n_ctx: M)" check is matched from its API error text, unverified in a server log; if it's logged as multi-line JSON rather than one line, it's missed. LM Studio 0.3.x logged refusals without the model tag (`[ERROR] Trying to keep the first N tokens…`); those aren't matched.
 - LM Studio's home is taken to be `~/.lmstudio`. A home moved with `~/.lmstudio-home-pointer`, the legacy `~/.cache/lm-studio` or the Flatpak's `~/.var/app/ai.lmstudio.lm-studio/.lmstudio` isn't followed: pass `--lms-bin` and `--server-log-dir`. Process matching still finds most of its processes by name, but not the `node` worker.
 - Nothing in the UI shows whether the server-log folder was found; the log says `server log folder …` when it can't be read. Refusals appear up to a second late, stamped to the second in local time.
 - `stop_reason` is NULL on rows recorded before v2 or by an older binary sharing the database.
