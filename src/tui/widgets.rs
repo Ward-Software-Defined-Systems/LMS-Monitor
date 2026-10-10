@@ -1,15 +1,19 @@
+use std::collections::VecDeque;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+use super::FEED_CAPACITY;
 use crate::aggregate::{AggregateSnapshot, WindowMetrics};
 use crate::api::ModelInfo;
 use crate::db::LifetimeTotals;
 use crate::hardware::{HardwareSnapshot, format_bytes, format_bytes_ratio};
 use crate::parser::InferenceRecord;
 use crate::pricing::{FRONTIER_MODELS, PricingTable, hypothetical_cost};
+use crate::server_log::ContextRejection;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ServerStatus {
@@ -153,7 +157,21 @@ pub fn render_models(
     f.render_widget(table, area);
 }
 
-pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
+/// A live-feed row: a request that ran, or one LM Studio refused because its prompt
+/// didn't fit the model's loaded context.
+#[derive(Debug, Clone)]
+pub enum FeedEntry {
+    /// `loaded_context` is the model's loaded context length when the record arrived, if
+    /// `/api/v0/models` listed one.
+    Completed {
+        record: InferenceRecord,
+        loaded_context: Option<u64>,
+    },
+    Rejected(ContextRejection),
+}
+
+/// `feed` is newest-first already.
+pub fn render_feed(f: &mut Frame, area: Rect, feed: &VecDeque<FeedEntry>) {
     let header = Row::new(vec![
         Cell::from("time"),
         Cell::from("model"),
@@ -169,24 +187,14 @@ pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = recent
+    let rows: Vec<Row> = feed
         .iter()
-        .rev() // newest first
-        .map(|r| {
-            let time = r
-                .started_at
-                .with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string();
-            Row::new(vec![
-                Cell::from(time),
-                Cell::from(truncate(&r.model_id, 28).to_string()),
-                Cell::from(r.prompt_tokens.to_string()),
-                Cell::from(r.gen_tokens.to_string()),
-                Cell::from(format!("{:.0}ms", r.ttft_ms)),
-                Cell::from(format!("{:.1}", r.tokens_per_second)),
-                Cell::from(r.stop_reason.as_deref().unwrap_or("-").to_string()),
-            ])
+        .map(|entry| match entry {
+            FeedEntry::Completed {
+                record,
+                loaded_context,
+            } => completed_row(record, *loaded_context),
+            FeedEntry::Rejected(r) => rejected_row(r),
         })
         .collect();
 
@@ -197,13 +205,84 @@ pub fn render_feed(f: &mut Frame, area: Rect, recent: &[InferenceRecord]) {
         Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(8),
-        Constraint::Length(24),
+        // Fits LM Studio's longest stop reason, `maxPredictedTokensReached`.
+        Constraint::Length(25),
     ];
-    let title = format!("live request feed ({}/30)", recent.len());
+    let title = format!("live request feed ({}/{FEED_CAPACITY})", feed.len());
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(table, area);
+}
+
+/// LM Studio's stop reason when generation runs into the loaded context's limit.
+const CONTEXT_FULL_STOP: &str = "contextLengthReached";
+
+/// LM Studio's stop reason when a reply reaches its token cap. Seen with MLX: a reply to
+/// a request without `max_tokens` that fills the context ends with this, not
+/// `contextLengthReached`.
+const TOKEN_CAP_STOP: &str = "maxPredictedTokensReached";
+
+/// Feed rows and cells that show context overflow use this colour.
+const OVERFLOW: Color = Color::Red;
+
+/// Whether a reply filled its model's loaded context. Below the context, a token cap is an
+/// ordinary output cap.
+fn filled_context(r: &InferenceRecord, loaded_context: Option<u64>) -> bool {
+    match r.stop_reason.as_deref() {
+        Some(CONTEXT_FULL_STOP) => true,
+        Some(TOKEN_CAP_STOP) => {
+            loaded_context.is_some_and(|ctx| r.prompt_tokens + r.gen_tokens >= ctx)
+        }
+        _ => false,
+    }
+}
+
+fn completed_row(r: &InferenceRecord, loaded_context: Option<u64>) -> Row<'static> {
+    let stop = r.stop_reason.as_deref().unwrap_or("-");
+    Row::new(vec![
+        Cell::from(local_hms(&r.started_at)),
+        Cell::from(truncate(&r.model_id, 28).to_string()),
+        Cell::from(r.prompt_tokens.to_string()),
+        Cell::from(r.gen_tokens.to_string()),
+        Cell::from(format!("{:.0}ms", r.ttft_ms)),
+        Cell::from(format!("{:.1}", r.tokens_per_second)),
+        stop_cell(stop, filled_context(r, loaded_context)),
+    ])
+}
+
+/// Nothing ran, so there's no generation, TTFT or speed; the prompt cell holds the size
+/// that didn't fit and the stop cell the context it was measured against.
+fn rejected_row(r: &ContextRejection) -> Row<'static> {
+    let stop = match r.context_length {
+        Some(ctx) => format!("rejected (ctx {ctx})"),
+        None => "rejected (ctx)".to_string(),
+    };
+    Row::new(vec![
+        Cell::from(local_hms(&r.at)),
+        Cell::from(truncate(&r.model_id, 28).to_string()),
+        Cell::from(r.input_tokens.map_or("?".to_string(), |n| n.to_string())),
+        Cell::from("-"),
+        Cell::from("-"),
+        Cell::from("-"),
+        stop_cell(&stop, true),
+    ])
+    .style(Style::default().fg(OVERFLOW))
+}
+
+fn stop_cell(text: &str, overflow: bool) -> Cell<'static> {
+    let cell = Cell::from(text.to_string());
+    if overflow {
+        cell.style(Style::default().fg(OVERFLOW))
+    } else {
+        cell
+    }
+}
+
+fn local_hms(t: &chrono::DateTime<chrono::Utc>) -> String {
+    t.with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 pub fn render_rolling(f: &mut Frame, area: Rect, snap: &AggregateSnapshot) {
@@ -338,9 +417,9 @@ pub fn render_costs(f: &mut Frame, area: Rect, snap: &AggregateSnapshot, pricing
     f.render_widget(table, area);
 }
 
-/// One-line hardware summary: system cpu/mem │ LM Studio process tree │ GPU/ANE.
-/// Groups run from most to least important left→right, so a narrow terminal
-/// clips the GPU/ANE tail before anything else.
+/// One-line hardware summary: system cpu/mem │ LM Studio process tree │ GPU/ANE (macOS)
+/// or GPU/VRAM (Linux). Groups run from most to least important left→right, so a narrow
+/// terminal clips the GPU tail before anything else.
 fn hardware_line(hw: &HardwareSnapshot) -> Line<'static> {
     let dim = Style::default().fg(Color::DarkGray);
     let sep = || Span::styled(" │ ", dim);
@@ -390,22 +469,31 @@ fn hardware_line(hw: &HardwareSnapshot) -> Line<'static> {
 
     spans.push(sep());
     spans.push(Span::raw("gpu "));
-    spans.push(match hw.gpu_active_percent {
+    spans.push(match hw.gpu_util_pct {
         Some(pct) => Span::styled(format!("{pct:>5.1}%"), cpu_style(pct)),
         None => Span::styled("  n/a", dim),
     });
-    spans.push(Span::raw("  ane "));
-    spans.push(match hw.ane_power_mw {
-        Some(mw) => Span::styled(
-            format!("{mw:>4.0} mW"),
-            Style::default().fg(if mw > 100.0 {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
-        None => Span::styled(" n/a", dim),
-    });
+    // `cfg!` rather than `#[cfg]` so both arms type-check on every platform.
+    if cfg!(target_os = "macos") {
+        spans.push(Span::raw("  ane "));
+        spans.push(match hw.ane_power_mw {
+            Some(mw) => Span::styled(
+                format!("{mw:>4.0} mW"),
+                Style::default().fg(if mw > 100.0 {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                }),
+            ),
+            None => Span::styled(" n/a", dim),
+        });
+    } else {
+        spans.push(Span::raw("  vram "));
+        spans.push(match hw.gpu_mem_used_bytes {
+            Some(bytes) => Span::styled(format_bytes(bytes), Style::default().fg(Color::Cyan)),
+            None => Span::styled(" n/a", dim),
+        });
+    }
 
     Line::from(spans)
 }
@@ -499,8 +587,9 @@ mod tests {
         let _ = Utc::now();
     }
     /// Worst-case-ish values: three-digit percentages, three-digit GB, double-digit
-    /// proc count, four-digit ANE mW. The whole row must stay one line and fit the
-    /// 118 inner columns of a 120-column terminal (typical values land near 108).
+    /// proc count, four-digit ANE mW (macOS) or double-digit GB of VRAM (Linux). The
+    /// whole row must stay one line and fit the 118 inner columns of a 120-column
+    /// terminal (typical values land near 108).
     #[test]
     fn hardware_line_is_one_compact_row() {
         let hw = HardwareSnapshot {
@@ -511,7 +600,8 @@ mod tests {
             lms_cpu_percent: 850.3,
             lms_rss_bytes: 98_700_000_000,
             lms_process_count: 12,
-            gpu_active_percent: Some(100.0),
+            gpu_util_pct: Some(100.0),
+            gpu_mem_used_bytes: Some(15_900_000_000),
             ane_power_mw: Some(1234.0),
         };
         let line = hardware_line(&hw);
@@ -530,7 +620,11 @@ mod tests {
             "rss 98.7 GB",
             "12 procs",
             "gpu 100.0%",
-            "ane 1234 mW",
+            if cfg!(target_os = "macos") {
+                "ane 1234 mW"
+            } else {
+                "vram 15.9 GB"
+            },
         ] {
             assert!(text.contains(needle), "missing {needle:?} in {text:?}");
         }
@@ -547,6 +641,11 @@ mod tests {
             "rss should be omitted without a process: {text:?}"
         );
         assert!(text.contains("gpu   n/a"), "{text:?}");
-        assert!(text.contains("ane  n/a"), "{text:?}");
+        let tail = if cfg!(target_os = "macos") {
+            "ane  n/a"
+        } else {
+            "vram  n/a"
+        };
+        assert!(text.contains(tail), "{text:?}");
     }
 }
